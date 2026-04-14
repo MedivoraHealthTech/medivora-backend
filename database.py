@@ -519,6 +519,25 @@ class DatabaseManager:
             .execute()
         )
         rows = result.data or []
+
+        # 3. Fetch prescription IDs for these consultations in one query
+        consultation_ids = [r["id"] for r in rows if r.get("id")]
+        prescription_map: dict = {}
+        if consultation_ids:
+            try:
+                rx_result = (
+                    self.client.table("prescriptions")
+                    .select("id, consultation_id")
+                    .in_("consultation_id", consultation_ids)
+                    .execute()
+                )
+                for rx in (rx_result.data or []):
+                    cid = rx.get("consultation_id")
+                    if cid and cid not in prescription_map:
+                        prescription_map[cid] = rx["id"]
+            except Exception:
+                pass
+
         for row in rows:
             doctor = row.pop("doctors", None) or {}
             profile = doctor.pop("profiles", None) or {}
@@ -526,6 +545,7 @@ class DatabaseManager:
             row["consultation_fee"] = doctor.get("consultation_fee")
             row["doctor_specialty"] = (doctor.get("specialties") or [""])[0]
             row["clinic_address"]   = doctor.get("clinic_address") or ""
+            row["prescription_id"]  = prescription_map.get(row["id"])
         return rows
 
     def _ensure_profile_and_patient(self, user_id: str, name: str = "", email: str = "") -> str:

@@ -146,11 +146,45 @@ limiter = Limiter(key_func=get_remote_address)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
-# ── Jitsi Meet video ─────────────────────────────────────────────────────────
-JITSI_DOMAIN = os.getenv("JITSI_DOMAIN", "meet.jit.si")
+# ── Daily video ──────────────────────────────────────────────────────────────
+DAILY_API_KEY  = os.getenv("DAILY_API_KEY", "")
+DAILY_BASE_URL = "https://api.daily.co/v1"
 
-def jitsi_room_name(session_id: str) -> str:
-    return f"medivora-{session_id}"
+def _daily_headers() -> dict:
+    return {"Authorization": f"Bearer {DAILY_API_KEY}", "Content-Type": "application/json"}
+
+async def create_daily_room(name: str) -> tuple[str, str]:
+    """Create a Daily room and return (room_name, room_url)."""
+    import httpx, time, re
+    safe_name = re.sub(r"[^a-z0-9-]", "-", name.lower())[:60].strip("-")
+    async with httpx.AsyncClient() as client:
+        res = await client.post(
+            f"{DAILY_BASE_URL}/rooms",
+            headers=_daily_headers(),
+            json={"name": safe_name, "privacy": "private", "properties": {}},
+            timeout=10,
+        )
+        res.raise_for_status()
+        data = res.json()
+        return data["name"], data["url"]
+
+async def create_daily_token(room_name: str, is_owner: bool, user_name: str) -> str:
+    """Create a Daily meeting token and return it."""
+    import httpx, time
+    async with httpx.AsyncClient() as client:
+        res = await client.post(
+            f"{DAILY_BASE_URL}/meeting-tokens",
+            headers=_daily_headers(),
+            json={"properties": {
+                "room_name": room_name,
+                "is_owner": is_owner,
+                "user_name": user_name,
+                "exp": int(time.time()) + 86400,
+            }},
+            timeout=10,
+        )
+        res.raise_for_status()
+        return res.json()["token"]
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Pydantic models
@@ -1938,23 +1972,6 @@ async def get_my_prescriptions_full(
         raise HTTPException(status_code=500, detail="Error retrieving prescriptions")
 
 
-@app.post("/demo/seed")
-async def seed_demo_data(
-    current_user: Dict = Depends(get_current_user_optional),
-):
-    """Seed sample consultations and prescriptions for the logged-in user.
-    Safe to call multiple times — skips if data already exists."""
-    if not current_user:
-        raise HTTPException(status_code=401, detail="Authentication required.")
-    try:
-        db = DatabaseManager()
-        display_name = current_user.get("name") or current_user.get("email", "Patient")
-        result = await db.seed_demo_data_for_user(current_user["sub"], display_name)
-        return result
-    except Exception as e:
-        logger.error(f"Error seeding demo data: {e}")
-        raise HTTPException(status_code=500, detail="Error seeding demo data")
-
 
 # ── Approval Workflow ────────────────────────────────────────────
 
@@ -2622,26 +2639,29 @@ async def request_consultation(
     patient_note: str  = Form(default=""),
     current_user: Dict = Depends(get_current_user),
 ):
-    """Patient requests a video consultation — creates a Jitsi Meet room."""
+    """Patient requests a video consultation — creates a Daily room."""
     db = DatabaseManager()
     session_id = f"cslt_{uuid.uuid4().hex[:12]}"
-    room_name  = jitsi_room_name(session_id)
-    room_url   = f"https://{JITSI_DOMAIN}/{room_name}"
+
+    # Create Daily room
+    if not DAILY_API_KEY:
+        raise HTTPException(status_code=503, detail="Video service not configured.")
+    try:
+        room_name, room_url = await create_daily_room(f"medivora-{specialty}-{session_id}")
+    except Exception as e:
+        logger.error(f"Daily room creation failed: {e}")
+        raise HTTPException(status_code=502, detail="Could not create video room.")
 
     session = await db.create_consultation({
-        "id": session_id,
-        "patient_id":    current_user["sub"],
-        "room_name":     room_name,
-        "room_url":      room_url,
-        "patient_token": None,
-        "doctor_token":  None,
-        "specialty":     specialty,
-        "patient_note":  patient_note,
+        "id":              session_id,
+        "patient_id":      current_user["sub"],
+        "daily_meeting_id": room_name,
+        "specialty":       specialty,
+        "patient_note":    patient_note,
     })
     if not session:
         raise HTTPException(status_code=500, detail="Failed to save consultation session.")
 
-    # Notify patient that consultation is booked
     try:
         await db.create_user_notification(
             user_id=current_user["sub"],
@@ -2655,7 +2675,6 @@ async def request_consultation(
 
     return {
         "session_id": session_id,
-        "room_url":   room_url,
         "status":     "waiting",
         "message":    "Consultation room created. A doctor will join shortly.",
     }
@@ -2745,12 +2764,29 @@ async def doctor_join_consultation(
     except Exception:
         pass
 
-    room_name = session.get("room_name") or jitsi_room_name(session_id)
-    room_url  = session.get("room_url")  or f"https://{JITSI_DOMAIN}/{room_name}"
+    # Create Daily token for doctor — lazily create room if needed
+    daily_room = session.get("daily_meeting_id")
+    if not daily_room:
+        if not DAILY_API_KEY:
+            raise HTTPException(status_code=503, detail="Video service not configured.")
+        try:
+            daily_room, _ = await create_daily_room(f"medivora-{session.get('specialty','general')}-{session_id}")
+            await db.update_consultation(session_id, {"daily_meeting_id": daily_room})
+        except Exception as e:
+            logger.error(f"Daily room creation failed in doctor join: {e}")
+            raise HTTPException(status_code=502, detail="Could not create video room.")
+
+    display_name = current_user.get("name") or "Doctor"
+    try:
+        auth_token = await create_daily_token(room_name=daily_room, is_owner=False, user_name=display_name)
+    except Exception as e:
+        logger.error(f"Daily token creation failed in doctor join: {e}")
+        raise HTTPException(status_code=502, detail="Could not connect to video room.")
+
     return {
         "session_id":   session_id,
-        "room_url":     room_url,
-        "room_name":    room_name,
+        "room_url":     f"https://medivora.daily.co/{daily_room}",
+        "auth_token":   auth_token,
         "patient_note": session.get("patient_note", ""),
         "specialty":    session.get("specialty", "general_medicine"),
     }
@@ -2933,18 +2969,18 @@ async def get_call_details(
     session_id:   str,
     current_user: Dict = Depends(get_current_user),
 ):
-    """Return Jitsi room info for patient or doctor to join the video call."""
+    """Return a Daily token and room URL for the participant to join the video call."""
     db = DatabaseManager()
     session = await db.get_consultation_by_id(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Consultation not found.")
 
-    # Allow patient who owns it or any doctor
     role    = current_user.get("role", "patient")
+    user_id = current_user.get("sub")
+
+    # Authorisation: patient must own the consultation
     if role != "doctor":
-        user_id = current_user.get("sub")
         stored_patient_id = session.get("patient_id", "")
-        # Resolve profile_id → patients.id (same logic as get_patient_consultations)
         try:
             p_row = db.client.table("patients").select("id").eq("profile_id", user_id).limit(1).execute()
             resolved_id = p_row.data[0]["id"] if p_row.data else user_id
@@ -2953,13 +2989,36 @@ async def get_call_details(
         if stored_patient_id not in (user_id, resolved_id):
             raise HTTPException(status_code=403, detail="Not authorised.")
 
-    room_name    = session.get("room_name") or jitsi_room_name(session_id)
+    room_name = session.get("daily_meeting_id")  # stored as room_name
+    if not room_name:
+        # Lazily create a Daily room if one wasn't created at booking time
+        if not DAILY_API_KEY:
+            raise HTTPException(status_code=503, detail="Video service not configured.")
+        try:
+            specialty = session.get("specialty", "general")
+            room_name, _ = await create_daily_room(f"medivora-{specialty}-{session_id}")
+            await db.update_consultation(session_id, {"daily_meeting_id": room_name})
+        except Exception as e:
+            logger.error(f"Daily lazy room creation failed: {e}")
+            raise HTTPException(status_code=502, detail="Could not create video room.")
+
     display_name = current_user.get("name") or ("Doctor" if role == "doctor" else "Patient")
+    is_owner = False  # Daily prebuilt UI works better without owner mode
+
+    try:
+        auth_token = await create_daily_token(
+            room_name=room_name,
+            is_owner=is_owner,
+            user_name=display_name,
+        )
+    except Exception as e:
+        logger.error(f"Daily token creation failed: {e}")
+        raise HTTPException(status_code=502, detail="Could not connect to video room.")
 
     return {
         "session_id":   session_id,
-        "room_name":    room_name,
-        "domain":       JITSI_DOMAIN,
+        "room_url":     f"https://medivora.daily.co/{room_name}",
+        "auth_token":   auth_token,
         "display_name": display_name,
         "role":         role,
         "patient_note": session.get("patient_note", ""),
@@ -3145,26 +3204,31 @@ async def submit_consultation_prescription(
         specialty    = consultation.get("specialty", "General Medicine")
         med_list = [
             {
-                "name":      m.get("medicine_name", ""),
-                "dosage":    m.get("dosage", ""),
-                "frequency": m.get("frequency", ""),
-                "duration":  m.get("duration", ""),
+                "name":         m.get("medicine_name", ""),
+                "generic_name": m.get("generic_name", ""),
+                "dosage":       m.get("dosage", ""),
+                "frequency":    m.get("frequency", ""),
+                "duration":     m.get("duration", ""),
+                "instructions": m.get("instructions", ""),
+                "before_food":  m.get("before_food"),
             }
             for m in medicines
         ]
-        instructions_text = "; ".join(payload.get("general_instructions", []))
         pdf_path = generate_prescription_pdf(
-            patient_name   = consultation.get("patient_name", "Patient"),
-            patient_age    = consultation.get("patient_age") or 0,
-            patient_gender = consultation.get("patient_gender", ""),
-            doctor_name    = doctor_name,
-            doctor_specialty = specialty,
-            nmc_number     = nmc_number,
-            diagnosis      = payload.get("diagnosis", ""),
-            medications    = med_list,
-            instructions   = instructions_text,
-            approval_id    = rx_id,
-            signature_hash = sig_hash,
+            patient_name           = consultation.get("patient_name", "Patient"),
+            patient_age            = consultation.get("patient_age") or 0,
+            patient_gender         = consultation.get("patient_gender", ""),
+            doctor_name            = doctor_name,
+            doctor_specialty       = specialty,
+            nmc_number             = nmc_number,
+            diagnosis              = payload.get("diagnosis", ""),
+            medications            = med_list,
+            general_instructions   = payload.get("general_instructions", []),
+            dietary_advice         = payload.get("dietary_advice", []),
+            warning_signs          = payload.get("warning_signs", []),
+            follow_up_instructions = payload.get("follow_up_instructions", ""),
+            approval_id            = rx_id,
+            signature_hash         = sig_hash,
         )
         # Store the file path in prescriptions.pdf_url
         db.client.table("prescriptions").update({"pdf_url": pdf_path}).eq("id", rx_id).execute()

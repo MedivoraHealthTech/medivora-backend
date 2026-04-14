@@ -551,10 +551,7 @@ CREATE TABLE consultations (
     completed_at        TIMESTAMPTZ,
     duration_minutes    INT,
 
-    room_name           VARCHAR(255),
-    room_url            VARCHAR(500),
-    patient_token       TEXT,
-    doctor_token        TEXT,
+    daily_meeting_id    VARCHAR(255),
 
     summary             TEXT,
     follow_up_plan      TEXT,
