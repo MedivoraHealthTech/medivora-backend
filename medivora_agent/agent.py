@@ -201,11 +201,8 @@ EXACT OUTPUT FORMAT — FOLLOW PRECISELY
 
 [If VERY_SEVERE: Put the 🚨 EMERGENCY routing block HERE first, then continue below]
 
----
 📋 MEDIVORA HEALTH ASSESSMENT
 Provisional — Pending Licensed Doctor Review
-
----
 
 👤 PATIENT PROFILE
 Name: <name from consultation_result Patient field, or "Not provided">
@@ -214,8 +211,6 @@ Gender: <gender from consultation_result Patient field, or "Not provided">
 Case Reference: <approval_id from prescription_result>
 Assessment Date: <today's date>
 
----
-
 ⚕️ SEVERITY LEVEL
 [Choose exactly ONE based on Severity in consultation_result:]
 🟢 MILD — Minor condition, home care with monitoring
@@ -223,48 +218,19 @@ Assessment Date: <today's date>
 🔴 SEVERE — Needs prompt attention within 4-6 hours
 🆘 VERY SEVERE — Medical emergency — act immediately
 
----
-
 🩺 CLINICAL ASSESSMENT
 Condition: <specific diagnosis — never vague>
 Specialist: <full specialty name e.g. "Orthopedic Surgeon", "Cardiologist">
 Also consider: <2nd and 3rd differentials briefly>
 
----
-
-✅ IMMEDIATE ACTIONS (Do these right now)
-1. <Most urgent, specific, concrete action>
-2. <Second action>
-3. <Third action if applicable>
-
----
-
-⚠️ GO TO EMERGENCY IMMEDIATELY IF:
-- <Specific red flag 1 — never generic>
-- <Specific red flag 2>
-- <Specific red flag 3 if applicable>
-
----
-
 💊 TREATMENT STATUS
-AI Prescription: Generated
-Doctor Review: In Progress
+AI Triage: Generated
+Doctor Recommended: In Progress
 Approval ID: <approval_id from prescription_result>
-Estimated Review: <MILD: 2-4 hrs | MODERATE: 1-2 hrs | SEVERE: 30 min | VERY_SEVERE: Emergency>
 
 No medicines should be taken before doctor approval.
 
----
-
-[Insert the ROUTING BLOCK matching the Severity here]
-
----
-
-📅 FOLLOW-UP
-<Specific follow-up — when, how often, what to monitor>
-
----
-⚕️ This is a preliminary AI assessment. Final prescription is valid only after licensed doctor approval. In any emergency, call 108 immediately.
+⚕️ This is a preliminary AI assessment. Final prescription is valid only after licensed doctor approval. In any emergency, call 108 as soon as you can.
 
 ═══════════════════════════════════════
 CRITICAL RULES — NEVER VIOLATE
@@ -275,7 +241,7 @@ CRITICAL RULES — NEVER VIOLATE
 4. VERY_SEVERE: 🚨 108 block goes FIRST — before patient profile, before everything
 5. Match patient's language — English / Hinglish / Devanagari. Medical terms stay in English.
 6. Be specific — "traumatic knee injury" not "injury"
-7. Routing block MUST match the severity level exactly
+7. Output ONLY the sections shown above — no extra sections, no routing blocks, no follow-up, no horizontal dividers
 """,
     tools=[],
     output_key="summary_result",
