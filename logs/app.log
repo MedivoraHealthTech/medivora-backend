@@ -780,3 +780,214 @@ INFO:     127.0.0.1:61400 - "GET /doctors HTTP/1.1" 200 OK
 INFO:     127.0.0.1:61542 - "GET /my/notifications HTTP/1.1" 200 OK
 2026-04-14 08:07:33,115 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/notifications?select=%2A&user_id=eq.7a5df5a8-4071-445f-95ac-290eae232b7b&order=created_at.desc&limit=50 "HTTP/2 200 OK"
 INFO:     127.0.0.1:62298 - "GET /my/notifications HTTP/1.1" 200 OK
+2026-04-14 08:08:03,197 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/notifications?select=%2A&user_id=eq.7a5df5a8-4071-445f-95ac-290eae232b7b&order=created_at.desc&limit=50 "HTTP/2 200 OK"
+INFO:     127.0.0.1:62490 - "GET /my/notifications HTTP/1.1" 200 OK
+2026-04-14 08:08:33,150 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/notifications?select=%2A&user_id=eq.7a5df5a8-4071-445f-95ac-290eae232b7b&order=created_at.desc&limit=50 "HTTP/2 200 OK"
+INFO:     127.0.0.1:62667 - "GET /my/notifications HTTP/1.1" 200 OK
+2026-04-14 08:09:28,231 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/notifications?select=%2A&user_id=eq.7a5df5a8-4071-445f-95ac-290eae232b7b&order=created_at.desc&limit=50 "HTTP/2 200 OK"
+INFO:     127.0.0.1:62970 - "GET /my/notifications HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63239 - "OPTIONS /my/prescriptions HTTP/1.1" 200 OK
+2026-04-14 08:10:14,432 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/notifications?select=%2A&user_id=eq.7a5df5a8-4071-445f-95ac-290eae232b7b&order=created_at.desc&limit=50 "HTTP/2 200 OK"
+INFO:     127.0.0.1:63242 - "GET /my/notifications HTTP/1.1" 200 OK
+2026-04-14 08:10:14,599 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/patients?select=id&profile_id=eq.7a5df5a8-4071-445f-95ac-290eae232b7b&limit=1 "HTTP/2 200 OK"
+2026-04-14 08:10:14,753 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/consultations?select=%2A%2Cdoctors%28id%2Cspecialties%2Cconsultation_fee%2Cclinic_address%2Cprofiles%28first_name%2Clast_name%29%29&patient_id=eq.35695074-e4d1-4fa0-96bd-f85f6b9d057c&order=created_at.desc "HTTP/2 200 OK"
+2026-04-14 08:10:14,883 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/prescriptions?select=id%2Cconsultation_id&consultation_id=in.%2842f08392-515d-41a6-88e7-85079a0c36d2%29 "HTTP/2 200 OK"
+INFO:     127.0.0.1:63243 - "GET /consultation/my HTTP/1.1" 200 OK
+2026-04-14 08:10:15,011 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/patients?select=id&profile_id=eq.7a5df5a8-4071-445f-95ac-290eae232b7b&limit=1 "HTTP/2 200 OK"
+2026-04-14 08:10:15,150 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/prescriptions?select=%2A%2Cprescription_items%28%2A%29%2Cdoctors%28profile_id%29&patient_id=eq.35695074-e4d1-4fa0-96bd-f85f6b9d057c&order=prescribed_at.desc "HTTP/2 200 OK"
+2026-04-14 08:10:15,281 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/profiles?select=first_name%2Clast_name&id=eq.7fae9e46-0f62-4100-80e6-5e78d69748a0&limit=1 "HTTP/2 200 OK"
+INFO:     127.0.0.1:63239 - "GET /my/prescriptions HTTP/1.1" 200 OK
+2026-04-14 08:10:15,421 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/doctors?select=%2A%2Cprofiles%28first_name%2Clast_name%2Cemail%29 "HTTP/2 200 OK"
+INFO:     127.0.0.1:63246 - "GET /doctors HTTP/1.1" 200 OK
+2026-04-14 08:10:15,558 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/patients?select=id&profile_id=eq.7a5df5a8-4071-445f-95ac-290eae232b7b&limit=1 "HTTP/2 200 OK"
+2026-04-14 08:10:15,693 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/consultations?select=%2A%2Cdoctors%28id%2Cspecialties%2Cconsultation_fee%2Cclinic_address%2Cprofiles%28first_name%2Clast_name%29%29&patient_id=eq.35695074-e4d1-4fa0-96bd-f85f6b9d057c&order=created_at.desc "HTTP/2 200 OK"
+2026-04-14 08:10:15,823 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/prescriptions?select=id%2Cconsultation_id&consultation_id=in.%2842f08392-515d-41a6-88e7-85079a0c36d2%29 "HTTP/2 200 OK"
+INFO:     127.0.0.1:63242 - "GET /consultation/my HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63247 - "OPTIONS /my/prescriptions HTTP/1.1" 200 OK
+2026-04-14 08:10:15,965 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/doctors?select=%2A%2Cprofiles%28first_name%2Clast_name%2Cemail%29 "HTTP/2 200 OK"
+INFO:     127.0.0.1:63243 - "GET /doctors HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63254 - "OPTIONS /consultation/doctor HTTP/1.1" 200 OK
+2026-04-14 08:10:16,101 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/patients?select=id&profile_id=eq.7a5df5a8-4071-445f-95ac-290eae232b7b&limit=1 "HTTP/2 200 OK"
+2026-04-14 08:10:16,270 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/consultations?select=%2A%2Cdoctors%28id%2Cspecialties%2Cconsultation_fee%2Cclinic_address%2Cprofiles%28first_name%2Clast_name%29%29&patient_id=eq.35695074-e4d1-4fa0-96bd-f85f6b9d057c&order=created_at.desc "HTTP/2 200 OK"
+2026-04-14 08:10:16,412 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/prescriptions?select=id%2Cconsultation_id&consultation_id=in.%2842f08392-515d-41a6-88e7-85079a0c36d2%29 "HTTP/2 200 OK"
+INFO:     127.0.0.1:63247 - "GET /consultation/my HTTP/1.1" 200 OK
+2026-04-14 08:10:16,543 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/patients?select=id&profile_id=eq.7a5df5a8-4071-445f-95ac-290eae232b7b&limit=1 "HTTP/2 200 OK"
+2026-04-14 08:10:16,680 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/prescriptions?select=%2A%2Cprescription_items%28%2A%29%2Cdoctors%28profile_id%29&patient_id=eq.35695074-e4d1-4fa0-96bd-f85f6b9d057c&order=prescribed_at.desc "HTTP/2 200 OK"
+2026-04-14 08:10:16,806 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/profiles?select=first_name%2Clast_name&id=eq.7fae9e46-0f62-4100-80e6-5e78d69748a0&limit=1 "HTTP/2 200 OK"
+INFO:     127.0.0.1:63242 - "GET /my/prescriptions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63256 - "OPTIONS /consultation/doctor HTTP/1.1" 200 OK
+2026-04-14 08:10:16,940 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/doctors?select=%2A%2Cprofiles%28first_name%2Clast_name%2Cemail%29 "HTTP/2 200 OK"
+INFO:     127.0.0.1:63246 - "GET /doctors HTTP/1.1" 200 OK
+2026-04-14 08:10:17,076 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/doctors?select=id&profile_id=eq.7fae9e46-0f62-4100-80e6-5e78d69748a0&limit=1 "HTTP/2 200 OK"
+2026-04-14 08:10:17,205 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/consultations?select=%2A%2Cpatients%28id%2Cprofiles%28first_name%2Clast_name%2Cphone%29%29&doctor_id=eq.773e3fd1-74ba-4541-89e4-609ba261a551&order=created_at.desc "HTTP/2 200 OK"
+2026-04-14 08:10:17,333 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/prescriptions?select=consultation_id&consultation_id=in.%2842f08392-515d-41a6-88e7-85079a0c36d2%29 "HTTP/2 200 OK"
+2026-04-14 08:10:17,483 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/consultations?select=%2A%2Cpatients%28id%2Cprofiles%28first_name%2Clast_name%2Cphone%29%29&status=in.%28requested%2Cwaiting%29&order=created_at.asc "HTTP/2 200 OK"
+2026-04-14 08:10:17,611 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/doctors?select=consultation_fee&id=eq.773e3fd1-74ba-4541-89e4-609ba261a551&limit=1 "HTTP/2 200 OK"
+2026-04-14 08:10:17,741 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/consultations?select=id&doctor_id=eq.773e3fd1-74ba-4541-89e4-609ba261a551&status=in.%28scheduled%2Ccompleted%29 "HTTP/2 200 OK"
+INFO:     127.0.0.1:63254 - "GET /consultation/doctor HTTP/1.1" 200 OK
+2026-04-14 08:10:17,874 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/notifications?select=%2A&user_id=eq.7a5df5a8-4071-445f-95ac-290eae232b7b&order=created_at.desc&limit=50 "HTTP/2 200 OK"
+INFO:     127.0.0.1:63258 - "GET /my/notifications HTTP/1.1" 200 OK
+2026-04-14 08:10:18,015 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/patients?select=id&profile_id=eq.7a5df5a8-4071-445f-95ac-290eae232b7b&limit=1 "HTTP/2 200 OK"
+2026-04-14 08:10:18,146 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/consultations?select=%2A%2Cdoctors%28id%2Cspecialties%2Cconsultation_fee%2Cclinic_address%2Cprofiles%28first_name%2Clast_name%29%29&patient_id=eq.35695074-e4d1-4fa0-96bd-f85f6b9d057c&order=created_at.desc "HTTP/2 200 OK"
+2026-04-14 08:10:18,274 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/prescriptions?select=id%2Cconsultation_id&consultation_id=in.%2842f08392-515d-41a6-88e7-85079a0c36d2%29 "HTTP/2 200 OK"
+INFO:     127.0.0.1:63243 - "GET /consultation/my HTTP/1.1" 200 OK
+2026-04-14 08:10:18,405 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/doctors?select=id&profile_id=eq.7fae9e46-0f62-4100-80e6-5e78d69748a0&limit=1 "HTTP/2 200 OK"
+2026-04-14 08:10:18,533 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/consultations?select=%2A%2Cpatients%28id%2Cprofiles%28first_name%2Clast_name%2Cphone%29%29&doctor_id=eq.773e3fd1-74ba-4541-89e4-609ba261a551&order=created_at.desc "HTTP/2 200 OK"
+2026-04-14 08:10:18,661 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/prescriptions?select=consultation_id&consultation_id=in.%2842f08392-515d-41a6-88e7-85079a0c36d2%29 "HTTP/2 200 OK"
+2026-04-14 08:10:18,787 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/consultations?select=%2A%2Cpatients%28id%2Cprofiles%28first_name%2Clast_name%2Cphone%29%29&status=in.%28requested%2Cwaiting%29&order=created_at.asc "HTTP/2 200 OK"
+2026-04-14 08:10:18,912 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/doctors?select=consultation_fee&id=eq.773e3fd1-74ba-4541-89e4-609ba261a551&limit=1 "HTTP/2 200 OK"
+2026-04-14 08:10:19,039 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/consultations?select=id&doctor_id=eq.773e3fd1-74ba-4541-89e4-609ba261a551&status=in.%28scheduled%2Ccompleted%29 "HTTP/2 200 OK"
+INFO:     127.0.0.1:63256 - "GET /consultation/doctor HTTP/1.1" 200 OK
+2026-04-14 08:10:19,170 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/doctors?select=%2A%2Cprofiles%28first_name%2Clast_name%2Cemail%29 "HTTP/2 200 OK"
+INFO:     127.0.0.1:63242 - "GET /doctors HTTP/1.1" 200 OK
+2026-04-14 08:10:19,305 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/patients?select=id&profile_id=eq.7a5df5a8-4071-445f-95ac-290eae232b7b&limit=1 "HTTP/2 200 OK"
+2026-04-14 08:10:19,440 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/consultations?select=%2A%2Cdoctors%28id%2Cspecialties%2Cconsultation_fee%2Cclinic_address%2Cprofiles%28first_name%2Clast_name%29%29&patient_id=eq.35695074-e4d1-4fa0-96bd-f85f6b9d057c&order=created_at.desc "HTTP/2 200 OK"
+2026-04-14 08:10:19,571 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/prescriptions?select=id%2Cconsultation_id&consultation_id=in.%2842f08392-515d-41a6-88e7-85079a0c36d2%29 "HTTP/2 200 OK"
+INFO:     127.0.0.1:63246 - "GET /consultation/my HTTP/1.1" 200 OK
+2026-04-14 08:10:19,706 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/doctors?select=%2A%2Cprofiles%28first_name%2Clast_name%2Cemail%29 "HTTP/2 200 OK"
+INFO:     127.0.0.1:63243 - "GET /doctors HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63455 - "OPTIONS /my/notifications HTTP/1.1" 200 OK
+2026-04-14 08:24:24,879 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/notifications?select=%2A&user_id=eq.7a5df5a8-4071-445f-95ac-290eae232b7b&order=created_at.desc&limit=50 "HTTP/2 200 OK"
+INFO:     127.0.0.1:63455 - "GET /my/notifications HTTP/1.1" 200 OK
+2026-04-14 08:24:25,043 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/patients?select=id&profile_id=eq.7a5df5a8-4071-445f-95ac-290eae232b7b&limit=1 "HTTP/2 200 OK"
+2026-04-14 08:24:25,287 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/consultations?select=%2A%2Cdoctors%28id%2Cspecialties%2Cconsultation_fee%2Cclinic_address%2Cprofiles%28first_name%2Clast_name%29%29&patient_id=eq.35695074-e4d1-4fa0-96bd-f85f6b9d057c&order=created_at.desc "HTTP/2 200 OK"
+2026-04-14 08:24:25,461 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/prescriptions?select=id%2Cconsultation_id&consultation_id=in.%2842f08392-515d-41a6-88e7-85079a0c36d2%29 "HTTP/2 200 OK"
+INFO:     127.0.0.1:63458 - "GET /consultation/my HTTP/1.1" 200 OK
+2026-04-14 08:24:25,614 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/doctors?select=%2A%2Cprofiles%28first_name%2Clast_name%2Cemail%29 "HTTP/2 200 OK"
+INFO:     127.0.0.1:63459 - "GET /doctors HTTP/1.1" 200 OK
+2026-04-14 08:24:54,081 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/notifications?select=%2A&user_id=eq.7a5df5a8-4071-445f-95ac-290eae232b7b&order=created_at.desc&limit=50 "HTTP/2 200 OK"
+INFO:     127.0.0.1:63660 - "GET /my/notifications HTTP/1.1" 200 OK
+2026-04-14 08:25:24,178 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/notifications?select=%2A&user_id=eq.7a5df5a8-4071-445f-95ac-290eae232b7b&order=created_at.desc&limit=50 "HTTP/2 200 OK"
+INFO:     127.0.0.1:63833 - "GET /my/notifications HTTP/1.1" 200 OK
+2026-04-14 08:25:53,978 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/notifications?select=%2A&user_id=eq.7a5df5a8-4071-445f-95ac-290eae232b7b&order=created_at.desc&limit=50 "HTTP/2 200 OK"
+INFO:     127.0.0.1:64019 - "GET /my/notifications HTTP/1.1" 200 OK
+2026-04-14 08:26:24,266 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/notifications?select=%2A&user_id=eq.7a5df5a8-4071-445f-95ac-290eae232b7b&order=created_at.desc&limit=50 "HTTP/2 200 OK"
+INFO:     127.0.0.1:64192 - "GET /my/notifications HTTP/1.1" 200 OK
+2026-04-14 08:26:53,444 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/patients?select=id&profile_id=eq.7a5df5a8-4071-445f-95ac-290eae232b7b&limit=1 "HTTP/2 200 OK"
+2026-04-14 08:26:53,711 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/prescriptions?select=%2A%2Cprescription_items%28%2A%29%2Cdoctors%28profile_id%29&patient_id=eq.35695074-e4d1-4fa0-96bd-f85f6b9d057c&order=prescribed_at.desc "HTTP/2 200 OK"
+2026-04-14 08:26:53,891 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/profiles?select=first_name%2Clast_name&id=eq.7fae9e46-0f62-4100-80e6-5e78d69748a0&limit=1 "HTTP/2 200 OK"
+INFO:     127.0.0.1:64364 - "GET /my/prescriptions HTTP/1.1" 200 OK
+2026-04-14 08:26:54,063 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/notifications?select=%2A&user_id=eq.7a5df5a8-4071-445f-95ac-290eae232b7b&order=created_at.desc&limit=50 "HTTP/2 200 OK"
+INFO:     127.0.0.1:64367 - "GET /my/notifications HTTP/1.1" 200 OK
+2026-04-14 08:26:54,227 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/patients?select=id&profile_id=eq.7a5df5a8-4071-445f-95ac-290eae232b7b&limit=1 "HTTP/2 200 OK"
+2026-04-14 08:26:54,421 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/prescriptions?select=%2A%2Cprescription_items%28%2A%29%2Cdoctors%28profile_id%29&patient_id=eq.35695074-e4d1-4fa0-96bd-f85f6b9d057c&order=prescribed_at.desc "HTTP/2 200 OK"
+2026-04-14 08:26:54,585 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/profiles?select=first_name%2Clast_name&id=eq.7fae9e46-0f62-4100-80e6-5e78d69748a0&limit=1 "HTTP/2 200 OK"
+INFO:     127.0.0.1:64364 - "GET /my/prescriptions HTTP/1.1" 200 OK
+2026-04-14 08:26:54,754 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/patients?select=id&profile_id=eq.7a5df5a8-4071-445f-95ac-290eae232b7b&limit=1 "HTTP/2 200 OK"
+2026-04-14 08:26:55,082 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/consultations?select=%2A%2Cdoctors%28id%2Cspecialties%2Cconsultation_fee%2Cclinic_address%2Cprofiles%28first_name%2Clast_name%29%29&patient_id=eq.35695074-e4d1-4fa0-96bd-f85f6b9d057c&order=created_at.desc "HTTP/2 200 OK"
+2026-04-14 08:26:55,261 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/prescriptions?select=id%2Cconsultation_id&consultation_id=in.%2842f08392-515d-41a6-88e7-85079a0c36d2%29 "HTTP/2 200 OK"
+INFO:     127.0.0.1:64368 - "GET /consultation/my HTTP/1.1" 200 OK
+2026-04-14 08:26:55,448 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/doctors?select=%2A%2Cprofiles%28first_name%2Clast_name%2Cemail%29 "HTTP/2 200 OK"
+INFO:     127.0.0.1:64370 - "GET /doctors HTTP/1.1" 200 OK
+2026-04-14 08:26:55,623 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/patients?select=id&profile_id=eq.7a5df5a8-4071-445f-95ac-290eae232b7b&limit=1 "HTTP/2 200 OK"
+2026-04-14 08:26:55,864 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/consultations?select=%2A%2Cdoctors%28id%2Cspecialties%2Cconsultation_fee%2Cclinic_address%2Cprofiles%28first_name%2Clast_name%29%29&patient_id=eq.35695074-e4d1-4fa0-96bd-f85f6b9d057c&order=created_at.desc "HTTP/2 200 OK"
+2026-04-14 08:26:56,044 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/prescriptions?select=id%2Cconsultation_id&consultation_id=in.%2842f08392-515d-41a6-88e7-85079a0c36d2%29 "HTTP/2 200 OK"
+INFO:     127.0.0.1:64367 - "GET /consultation/my HTTP/1.1" 200 OK
+2026-04-14 08:26:56,234 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/doctors?select=id&profile_id=eq.7fae9e46-0f62-4100-80e6-5e78d69748a0&limit=1 "HTTP/2 200 OK"
+2026-04-14 08:26:56,362 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/consultations?select=%2A%2Cpatients%28id%2Cprofiles%28first_name%2Clast_name%2Cphone%29%29&doctor_id=eq.773e3fd1-74ba-4541-89e4-609ba261a551&order=created_at.desc "HTTP/2 200 OK"
+2026-04-14 08:26:56,485 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/prescriptions?select=consultation_id&consultation_id=in.%2842f08392-515d-41a6-88e7-85079a0c36d2%29 "HTTP/2 200 OK"
+2026-04-14 08:26:56,618 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/consultations?select=%2A%2Cpatients%28id%2Cprofiles%28first_name%2Clast_name%2Cphone%29%29&status=in.%28requested%2Cwaiting%29&order=created_at.asc "HTTP/2 200 OK"
+2026-04-14 08:26:56,742 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/doctors?select=consultation_fee&id=eq.773e3fd1-74ba-4541-89e4-609ba261a551&limit=1 "HTTP/2 200 OK"
+2026-04-14 08:26:56,863 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/consultations?select=id&doctor_id=eq.773e3fd1-74ba-4541-89e4-609ba261a551&status=in.%28scheduled%2Ccompleted%29 "HTTP/2 200 OK"
+INFO:     127.0.0.1:64373 - "GET /consultation/doctor HTTP/1.1" 200 OK
+2026-04-14 08:26:56,992 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/doctors?select=%2A%2Cprofiles%28first_name%2Clast_name%2Cemail%29 "HTTP/2 200 OK"
+INFO:     127.0.0.1:64368 - "GET /doctors HTTP/1.1" 200 OK
+2026-04-14 08:26:57,123 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/notifications?select=%2A&user_id=eq.7a5df5a8-4071-445f-95ac-290eae232b7b&order=created_at.desc&limit=50 "HTTP/2 200 OK"
+INFO:     127.0.0.1:64384 - "GET /my/notifications HTTP/1.1" 200 OK
+2026-04-14 08:26:57,256 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/patients?select=id&profile_id=eq.7a5df5a8-4071-445f-95ac-290eae232b7b&limit=1 "HTTP/2 200 OK"
+2026-04-14 08:26:57,377 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/consultations?select=%2A%2Cdoctors%28id%2Cspecialties%2Cconsultation_fee%2Cclinic_address%2Cprofiles%28first_name%2Clast_name%29%29&patient_id=eq.35695074-e4d1-4fa0-96bd-f85f6b9d057c&order=created_at.desc "HTTP/2 200 OK"
+2026-04-14 08:26:57,501 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/prescriptions?select=id%2Cconsultation_id&consultation_id=in.%2842f08392-515d-41a6-88e7-85079a0c36d2%29 "HTTP/2 200 OK"
+INFO:     127.0.0.1:64370 - "GET /consultation/my HTTP/1.1" 200 OK
+2026-04-14 08:26:57,645 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/doctors?select=%2A%2Cprofiles%28first_name%2Clast_name%2Cemail%29 "HTTP/2 200 OK"
+INFO:     127.0.0.1:64367 - "GET /doctors HTTP/1.1" 200 OK
+2026-04-14 08:26:57,776 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/doctors?select=id&profile_id=eq.7fae9e46-0f62-4100-80e6-5e78d69748a0&limit=1 "HTTP/2 200 OK"
+2026-04-14 08:26:57,904 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/consultations?select=%2A%2Cpatients%28id%2Cprofiles%28first_name%2Clast_name%2Cphone%29%29&doctor_id=eq.773e3fd1-74ba-4541-89e4-609ba261a551&order=created_at.desc "HTTP/2 200 OK"
+2026-04-14 08:26:58,023 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/prescriptions?select=consultation_id&consultation_id=in.%2842f08392-515d-41a6-88e7-85079a0c36d2%29 "HTTP/2 200 OK"
+2026-04-14 08:26:58,150 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/consultations?select=%2A%2Cpatients%28id%2Cprofiles%28first_name%2Clast_name%2Cphone%29%29&status=in.%28requested%2Cwaiting%29&order=created_at.asc "HTTP/2 200 OK"
+2026-04-14 08:26:58,270 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/doctors?select=consultation_fee&id=eq.773e3fd1-74ba-4541-89e4-609ba261a551&limit=1 "HTTP/2 200 OK"
+2026-04-14 08:26:58,417 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/consultations?select=id&doctor_id=eq.773e3fd1-74ba-4541-89e4-609ba261a551&status=in.%28scheduled%2Ccompleted%29 "HTTP/2 200 OK"
+INFO:     127.0.0.1:64403 - "GET /consultation/doctor HTTP/1.1" 200 OK
+2026-04-14 08:26:58,553 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/patients?select=id&profile_id=eq.7a5df5a8-4071-445f-95ac-290eae232b7b&limit=1 "HTTP/2 200 OK"
+2026-04-14 08:26:58,681 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/consultations?select=%2A%2Cdoctors%28id%2Cspecialties%2Cconsultation_fee%2Cclinic_address%2Cprofiles%28first_name%2Clast_name%29%29&patient_id=eq.35695074-e4d1-4fa0-96bd-f85f6b9d057c&order=created_at.desc "HTTP/2 200 OK"
+2026-04-14 08:26:58,807 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/prescriptions?select=id%2Cconsultation_id&consultation_id=in.%2842f08392-515d-41a6-88e7-85079a0c36d2%29 "HTTP/2 200 OK"
+INFO:     127.0.0.1:64368 - "GET /consultation/my HTTP/1.1" 200 OK
+2026-04-14 08:26:58,930 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/doctors?select=%2A%2Cprofiles%28first_name%2Clast_name%2Cemail%29 "HTTP/2 200 OK"
+INFO:     127.0.0.1:64370 - "GET /doctors HTTP/1.1" 200 OK
+2026-04-14 08:26:59,060 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/patients?select=id&profile_id=eq.7a5df5a8-4071-445f-95ac-290eae232b7b&limit=1 "HTTP/2 200 OK"
+2026-04-14 08:26:59,191 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/consultations?select=%2A%2Cdoctors%28id%2Cspecialties%2Cconsultation_fee%2Cclinic_address%2Cprofiles%28first_name%2Clast_name%29%29&patient_id=eq.35695074-e4d1-4fa0-96bd-f85f6b9d057c&order=created_at.desc "HTTP/2 200 OK"
+2026-04-14 08:26:59,312 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/prescriptions?select=id%2Cconsultation_id&consultation_id=in.%2842f08392-515d-41a6-88e7-85079a0c36d2%29 "HTTP/2 200 OK"
+INFO:     127.0.0.1:64367 - "GET /consultation/my HTTP/1.1" 200 OK
+2026-04-14 08:27:03,663 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/doctors?select=%2A%2Cprofiles%28first_name%2Clast_name%2Cemail%29 "HTTP/2 200 OK"
+INFO:     127.0.0.1:64368 - "GET /doctors HTTP/1.1" 200 OK
+2026-04-14 08:27:04,468 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/doctors?select=id&profile_id=eq.7fae9e46-0f62-4100-80e6-5e78d69748a0&limit=1 "HTTP/2 200 OK"
+2026-04-14 08:27:04,594 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/consultations?select=%2A%2Cpatients%28id%2Cprofiles%28first_name%2Clast_name%2Cphone%29%29&doctor_id=eq.773e3fd1-74ba-4541-89e4-609ba261a551&order=created_at.desc "HTTP/2 200 OK"
+2026-04-14 08:27:04,711 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/prescriptions?select=consultation_id&consultation_id=in.%2842f08392-515d-41a6-88e7-85079a0c36d2%29 "HTTP/2 200 OK"
+2026-04-14 08:27:04,828 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/consultations?select=%2A%2Cpatients%28id%2Cprofiles%28first_name%2Clast_name%2Cphone%29%29&status=in.%28requested%2Cwaiting%29&order=created_at.asc "HTTP/2 200 OK"
+2026-04-14 08:27:04,950 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/doctors?select=consultation_fee&id=eq.773e3fd1-74ba-4541-89e4-609ba261a551&limit=1 "HTTP/2 200 OK"
+2026-04-14 08:27:05,070 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/consultations?select=id&doctor_id=eq.773e3fd1-74ba-4541-89e4-609ba261a551&status=in.%28scheduled%2Ccompleted%29 "HTTP/2 200 OK"
+INFO:     127.0.0.1:64437 - "GET /consultation/doctor HTTP/1.1" 200 OK
+2026-04-14 08:27:05,188 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/patients?select=id&profile_id=eq.7a5df5a8-4071-445f-95ac-290eae232b7b&limit=1 "HTTP/2 200 OK"
+2026-04-14 08:27:05,310 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/prescriptions?select=%2A%2Cprescription_items%28%2A%29%2Cdoctors%28profile_id%29&patient_id=eq.35695074-e4d1-4fa0-96bd-f85f6b9d057c&order=prescribed_at.desc "HTTP/2 200 OK"
+2026-04-14 08:27:05,434 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/profiles?select=first_name%2Clast_name&id=eq.7fae9e46-0f62-4100-80e6-5e78d69748a0&limit=1 "HTTP/2 200 OK"
+INFO:     127.0.0.1:64439 - "GET /my/prescriptions HTTP/1.1" 200 OK
+2026-04-14 08:27:05,560 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/notifications?select=%2A&user_id=eq.7a5df5a8-4071-445f-95ac-290eae232b7b&order=created_at.desc&limit=50 "HTTP/2 200 OK"
+INFO:     127.0.0.1:64441 - "GET /my/notifications HTTP/1.1" 200 OK
+2026-04-14 08:27:05,691 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/patients?select=id&profile_id=eq.7a5df5a8-4071-445f-95ac-290eae232b7b&limit=1 "HTTP/2 200 OK"
+2026-04-14 08:27:05,813 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/prescriptions?select=%2A%2Cprescription_items%28%2A%29%2Cdoctors%28profile_id%29&patient_id=eq.35695074-e4d1-4fa0-96bd-f85f6b9d057c&order=prescribed_at.desc "HTTP/2 200 OK"
+2026-04-14 08:27:05,933 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/profiles?select=first_name%2Clast_name&id=eq.7fae9e46-0f62-4100-80e6-5e78d69748a0&limit=1 "HTTP/2 200 OK"
+INFO:     127.0.0.1:64439 - "GET /my/prescriptions HTTP/1.1" 200 OK
+2026-04-14 08:27:06,057 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/patients?select=id&profile_id=eq.7a5df5a8-4071-445f-95ac-290eae232b7b&limit=1 "HTTP/2 200 OK"
+2026-04-14 08:27:06,187 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/consultations?select=%2A%2Cdoctors%28id%2Cspecialties%2Cconsultation_fee%2Cclinic_address%2Cprofiles%28first_name%2Clast_name%29%29&patient_id=eq.35695074-e4d1-4fa0-96bd-f85f6b9d057c&order=created_at.desc "HTTP/2 200 OK"
+2026-04-14 08:27:06,310 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/prescriptions?select=id%2Cconsultation_id&consultation_id=in.%2842f08392-515d-41a6-88e7-85079a0c36d2%29 "HTTP/2 200 OK"
+INFO:     127.0.0.1:64443 - "GET /consultation/my HTTP/1.1" 200 OK
+2026-04-14 08:27:06,437 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/doctors?select=%2A%2Cprofiles%28first_name%2Clast_name%2Cemail%29 "HTTP/2 200 OK"
+INFO:     127.0.0.1:64445 - "GET /doctors HTTP/1.1" 200 OK
+2026-04-14 08:27:06,564 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/patients?select=id&profile_id=eq.7a5df5a8-4071-445f-95ac-290eae232b7b&limit=1 "HTTP/2 200 OK"
+2026-04-14 08:27:06,716 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/consultations?select=%2A%2Cdoctors%28id%2Cspecialties%2Cconsultation_fee%2Cclinic_address%2Cprofiles%28first_name%2Clast_name%29%29&patient_id=eq.35695074-e4d1-4fa0-96bd-f85f6b9d057c&order=created_at.desc "HTTP/2 200 OK"
+2026-04-14 08:27:06,837 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/prescriptions?select=id%2Cconsultation_id&consultation_id=in.%2842f08392-515d-41a6-88e7-85079a0c36d2%29 "HTTP/2 200 OK"
+INFO:     127.0.0.1:64441 - "GET /consultation/my HTTP/1.1" 200 OK
+2026-04-14 08:27:06,979 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/doctors?select=id&profile_id=eq.7fae9e46-0f62-4100-80e6-5e78d69748a0&limit=1 "HTTP/2 200 OK"
+2026-04-14 08:27:07,102 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/consultations?select=%2A%2Cpatients%28id%2Cprofiles%28first_name%2Clast_name%2Cphone%29%29&doctor_id=eq.773e3fd1-74ba-4541-89e4-609ba261a551&order=created_at.desc "HTTP/2 200 OK"
+2026-04-14 08:27:07,230 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/prescriptions?select=consultation_id&consultation_id=in.%2842f08392-515d-41a6-88e7-85079a0c36d2%29 "HTTP/2 200 OK"
+2026-04-14 08:27:07,359 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/consultations?select=%2A%2Cpatients%28id%2Cprofiles%28first_name%2Clast_name%2Cphone%29%29&status=in.%28requested%2Cwaiting%29&order=created_at.asc "HTTP/2 200 OK"
+2026-04-14 08:27:07,482 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/doctors?select=consultation_fee&id=eq.773e3fd1-74ba-4541-89e4-609ba261a551&limit=1 "HTTP/2 200 OK"
+2026-04-14 08:27:07,601 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/consultations?select=id&doctor_id=eq.773e3fd1-74ba-4541-89e4-609ba261a551&status=in.%28scheduled%2Ccompleted%29 "HTTP/2 200 OK"
+INFO:     127.0.0.1:64453 - "GET /consultation/doctor HTTP/1.1" 200 OK
+2026-04-14 08:27:07,731 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/doctors?select=%2A%2Cprofiles%28first_name%2Clast_name%2Cemail%29 "HTTP/2 200 OK"
+INFO:     127.0.0.1:64443 - "GET /doctors HTTP/1.1" 200 OK
+2026-04-14 08:27:07,861 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/notifications?select=%2A&user_id=eq.7a5df5a8-4071-445f-95ac-290eae232b7b&order=created_at.desc&limit=50 "HTTP/2 200 OK"
+INFO:     127.0.0.1:64455 - "GET /my/notifications HTTP/1.1" 200 OK
+2026-04-14 08:27:07,994 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/patients?select=id&profile_id=eq.7a5df5a8-4071-445f-95ac-290eae232b7b&limit=1 "HTTP/2 200 OK"
+2026-04-14 08:27:08,121 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/consultations?select=%2A%2Cdoctors%28id%2Cspecialties%2Cconsultation_fee%2Cclinic_address%2Cprofiles%28first_name%2Clast_name%29%29&patient_id=eq.35695074-e4d1-4fa0-96bd-f85f6b9d057c&order=created_at.desc "HTTP/2 200 OK"
+2026-04-14 08:27:08,241 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/prescriptions?select=id%2Cconsultation_id&consultation_id=in.%2842f08392-515d-41a6-88e7-85079a0c36d2%29 "HTTP/2 200 OK"
+INFO:     127.0.0.1:64445 - "GET /consultation/my HTTP/1.1" 200 OK
+2026-04-14 08:27:08,366 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/doctors?select=%2A%2Cprofiles%28first_name%2Clast_name%2Cemail%29 "HTTP/2 200 OK"
+INFO:     127.0.0.1:64455 - "GET /doctors HTTP/1.1" 200 OK
+2026-04-14 08:27:08,498 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/patients?select=id&profile_id=eq.7a5df5a8-4071-445f-95ac-290eae232b7b&limit=1 "HTTP/2 200 OK"
+2026-04-14 08:27:08,620 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/consultations?select=%2A%2Cdoctors%28id%2Cspecialties%2Cconsultation_fee%2Cclinic_address%2Cprofiles%28first_name%2Clast_name%29%29&patient_id=eq.35695074-e4d1-4fa0-96bd-f85f6b9d057c&order=created_at.desc "HTTP/2 200 OK"
+2026-04-14 08:27:08,739 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/prescriptions?select=id%2Cconsultation_id&consultation_id=in.%2842f08392-515d-41a6-88e7-85079a0c36d2%29 "HTTP/2 200 OK"
+INFO:     127.0.0.1:64443 - "GET /consultation/my HTTP/1.1" 200 OK
+2026-04-14 08:27:08,863 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/doctors?select=%2A%2Cprofiles%28first_name%2Clast_name%2Cemail%29 "HTTP/2 200 OK"
+INFO:     127.0.0.1:64445 - "GET /doctors HTTP/1.1" 200 OK
+2026-04-14 08:27:08,998 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/patients?select=id&profile_id=eq.7a5df5a8-4071-445f-95ac-290eae232b7b&limit=1 "HTTP/2 200 OK"
+2026-04-14 08:27:09,118 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/consultations?select=%2A%2Cdoctors%28id%2Cspecialties%2Cconsultation_fee%2Cclinic_address%2Cprofiles%28first_name%2Clast_name%29%29&patient_id=eq.35695074-e4d1-4fa0-96bd-f85f6b9d057c&order=created_at.desc "HTTP/2 200 OK"
+2026-04-14 08:27:09,247 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/prescriptions?select=id%2Cconsultation_id&consultation_id=in.%2842f08392-515d-41a6-88e7-85079a0c36d2%29 "HTTP/2 200 OK"
+INFO:     127.0.0.1:64455 - "GET /consultation/my HTTP/1.1" 200 OK
+2026-04-14 08:27:09,372 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/doctors?select=%2A%2Cprofiles%28first_name%2Clast_name%2Cemail%29 "HTTP/2 200 OK"
+INFO:     127.0.0.1:64443 - "GET /doctors HTTP/1.1" 200 OK
+2026-04-14 08:41:44,112 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/notifications?select=%2A&user_id=eq.7a5df5a8-4071-445f-95ac-290eae232b7b&order=created_at.desc&limit=50 "HTTP/2 200 OK"
+INFO:     127.0.0.1:64636 - "GET /my/notifications HTTP/1.1" 200 OK
+2026-04-14 08:45:48,024 | WARNING | medivora.database | get_user_notifications failed: [Errno 8] nodename nor servname provided, or not known
+INFO:     127.0.0.1:64812 - "GET /my/notifications HTTP/1.1" 200 OK
+2026-04-14 09:19:59,520 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/notifications?select=%2A&user_id=eq.7a5df5a8-4071-445f-95ac-290eae232b7b&order=created_at.desc&limit=50 "HTTP/2 200 OK"
+INFO:     127.0.0.1:64978 - "GET /my/notifications HTTP/1.1" 200 OK
+2026-04-14 09:20:00,448 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/patients?select=id&profile_id=eq.7a5df5a8-4071-445f-95ac-290eae232b7b&limit=1 "HTTP/2 200 OK"
+2026-04-14 09:20:00,783 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/consultations?select=%2A%2Cdoctors%28id%2Cspecialties%2Cconsultation_fee%2Cclinic_address%2Cprofiles%28first_name%2Clast_name%29%29&patient_id=eq.35695074-e4d1-4fa0-96bd-f85f6b9d057c&order=created_at.desc "HTTP/2 200 OK"
+2026-04-14 09:20:00,972 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/prescriptions?select=id%2Cconsultation_id&consultation_id=in.%2842f08392-515d-41a6-88e7-85079a0c36d2%29 "HTTP/2 200 OK"
+INFO:     127.0.0.1:64978 - "GET /consultation/my HTTP/1.1" 200 OK
+2026-04-14 09:20:01,156 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/doctors?select=%2A%2Cprofiles%28first_name%2Clast_name%2Cemail%29 "HTTP/2 200 OK"
+INFO:     127.0.0.1:65020 - "GET /doctors HTTP/1.1" 200 OK
+2026-04-14 09:30:56,618 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/faqs?select=id%2Cquestion%2Cpoints%2Cdisplay_order&is_active=eq.True&order=display_order.asc "HTTP/2 200 OK"
+INFO:     127.0.0.1:49787 - "GET /faqs HTTP/1.1" 200 OK
+2026-04-14 09:30:56,791 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/faqs?select=id%2Cquestion%2Cpoints%2Cdisplay_order&is_active=eq.True&order=display_order.asc "HTTP/2 200 OK"
+INFO:     127.0.0.1:49790 - "GET /faqs HTTP/1.1" 200 OK
