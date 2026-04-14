@@ -3531,7 +3531,7 @@ async def validate_promocode(
     """Validate a promo code and return the discount details."""
     body = await request.json()
     code = (body.get("code") or "").strip().upper()
-    amount = int(body.get("amount") or 0)   # base amount in rupees (before GST)
+    amount = int(body.get("amount") or 0)   # base amount in rupees
 
     if not code:
         raise HTTPException(status_code=400, detail="Promo code is required.")
@@ -3648,6 +3648,65 @@ async def create_hosted_order(
         "prefill[contact]": patient_contact,
         "prefill[email]":   patient_email,
     }
+
+
+@app.post("/payments/verify")
+async def verify_payment(request: Request, current_user: Dict = Depends(get_current_user)):
+    """
+    Called by the frontend after Razorpay checkout.js succeeds.
+    Verifies HMAC signature, creates consultation, returns session_id.
+    """
+    import hmac as _hmac, hashlib
+
+    body                = await request.json()
+    razorpay_order_id   = body.get("razorpay_order_id", "")
+    razorpay_payment_id = body.get("razorpay_payment_id", "")
+    razorpay_signature  = body.get("razorpay_signature", "")
+    doctor_id           = body.get("doctor_id", "")
+    specialty           = body.get("specialty", "general_medicine")
+    scheduled_at        = body.get("scheduled_at") or None
+    consultation_type   = body.get("consultation_type", "in_person")
+    patient_note        = body.get("patient_note", "")
+
+    key_secret = os.getenv("RAZORPAY_KEY_SECRET", "")
+    payload    = f"{razorpay_order_id}|{razorpay_payment_id}"
+    expected   = _hmac.new(key_secret.encode(), payload.encode(), hashlib.sha256).hexdigest()
+
+    if not _hmac.compare_digest(expected, razorpay_signature):
+        logger.warning(f"verify_payment: invalid signature for order {razorpay_order_id}")
+        raise HTTPException(status_code=400, detail="Invalid payment signature")
+
+    try:
+        db         = DatabaseManager()
+        session_id = str(uuid.uuid4())
+        await db.create_consultation({
+            "id":                session_id,
+            "patient_id":        current_user["sub"],
+            "doctor_id":         doctor_id,
+            "specialty":         specialty,
+            "patient_note":      patient_note,
+            "status":            "scheduled",
+            "scheduled_at":      scheduled_at,
+            "payment_id":        razorpay_payment_id,
+            "payment_order_id":  razorpay_order_id,
+            "consultation_type": consultation_type,
+            "created_at":        datetime.now().isoformat(),
+        })
+        logger.info(f"Consultation {session_id} created after Razorpay payment {razorpay_payment_id}")
+        try:
+            await db.create_notification(
+                user_id=current_user["sub"],
+                notification_type="consultation",
+                title="Booking Confirmed",
+                message="Your consultation has been booked successfully.",
+                priority=2,
+            )
+        except Exception:
+            pass
+        return {"session_id": session_id}
+    except Exception as e:
+        logger.error(f"Consultation creation after verify failed: {e}")
+        raise HTTPException(status_code=500, detail="Booking could not be created")
 
 
 @app.post("/payment/callback")
