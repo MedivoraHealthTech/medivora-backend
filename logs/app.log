@@ -776,3 +776,7 @@ INFO:     127.0.0.1:61400 - "OPTIONS /doctors HTTP/1.1" 200 OK
 INFO:     127.0.0.1:61399 - "GET /consultation/my HTTP/1.1" 200 OK
 2026-04-14 08:06:38,409 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/doctors?select=%2A%2Cprofiles%28first_name%2Clast_name%2Cemail%29 "HTTP/2 200 OK"
 INFO:     127.0.0.1:61400 - "GET /doctors HTTP/1.1" 200 OK
+2026-04-14 08:07:03,125 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/notifications?select=%2A&user_id=eq.7a5df5a8-4071-445f-95ac-290eae232b7b&order=created_at.desc&limit=50 "HTTP/2 200 OK"
+INFO:     127.0.0.1:61542 - "GET /my/notifications HTTP/1.1" 200 OK
+2026-04-14 08:07:33,115 | INFO | httpx | HTTP Request: GET https://tdeunuomvnkqdcvfotzo.supabase.co/rest/v1/notifications?select=%2A&user_id=eq.7a5df5a8-4071-445f-95ac-290eae232b7b&order=created_at.desc&limit=50 "HTTP/2 200 OK"
+INFO:     127.0.0.1:62298 - "GET /my/notifications HTTP/1.1" 200 OK
