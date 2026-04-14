@@ -1,0 +1,32 @@
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+*.log
+logs/
+
+# Environment files
+.env
+.env.*
+.env.example
+
+# Database schema and SQL files
+schema.sql
+seed_dummy_data.sql
+migrations/*.sql
+
+# Cache databases (auto-modified on every run)
+data/cache/cache.db
+data/api_cache/cache.db
+
+# Generated prescription PDFs
+data/prescriptions/
+
+# Temp files
+*.tmp
+test_write
+
+# OS
+.DS_Store
