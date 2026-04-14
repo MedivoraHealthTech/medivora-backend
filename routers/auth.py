@@ -309,11 +309,21 @@ async def update_user_profile(
     age: str = Form(default=None),
     gender: str = Form(default=None),
     blood_group: str = Form(default=None),
+    height_cm: str = Form(default=None),
+    weight_kg: str = Form(default=None),
     address: str = Form(default=None),
     emergency_contact: str = Form(default=None),
+    emergency_contact_name: str = Form(default=None),
+    emergency_contact_phone: str = Form(default=None),
+    emergency_contact_relation: str = Form(default=None),
     medical_history: str = Form(default=None),
     current_medications: str = Form(default=None),
     allergies: str = Form(default=None),
+    chronic_conditions: str = Form(default=None),
+    is_smoker: str = Form(default=None),
+    is_alcohol_user: str = Form(default=None),
+    is_pregnant: str = Form(default=None),
+    is_nursing: str = Form(default=None),
 ):
     """Update patient profile and medical details (own record only)."""
     if current_user["sub"] != user_id:
@@ -348,16 +358,40 @@ async def update_user_profile(
         patient_data["gender"] = gender.strip()
     if blood_group is not None and blood_group.strip():
         patient_data["blood_group"] = blood_group.strip()
+    if height_cm is not None and height_cm.strip():
+        try:
+            patient_data["height_cm"] = float(height_cm)
+        except ValueError:
+            pass
+    if weight_kg is not None and weight_kg.strip():
+        try:
+            patient_data["weight_kg"] = float(weight_kg)
+        except ValueError:
+            pass
     if address is not None and address.strip():
         patient_data["address"] = address.strip()
     if emergency_contact is not None and emergency_contact.strip():
         patient_data["emergency_contact_phone"] = emergency_contact.strip()
+    if emergency_contact_name is not None and emergency_contact_name.strip():
+        patient_data["emergency_contact_name"] = emergency_contact_name.strip()
+    if emergency_contact_phone is not None and emergency_contact_phone.strip():
+        patient_data["emergency_contact_phone"] = emergency_contact_phone.strip()
+    if emergency_contact_relation is not None and emergency_contact_relation.strip():
+        patient_data["emergency_contact_relation"] = emergency_contact_relation.strip()
     if medical_history is not None and medical_history.strip():
         patient_data["medical_history"] = medical_history.strip()
     if current_medications is not None and current_medications.strip():
         patient_data["current_medications"] = current_medications.strip()
     if allergies is not None and allergies.strip():
         patient_data["allergies"] = allergies.strip()
+    if chronic_conditions is not None and chronic_conditions.strip():
+        patient_data["chronic_conditions"] = chronic_conditions.strip()
+    for flag_key, flag_val in [
+        ("is_smoker", is_smoker), ("is_alcohol_user", is_alcohol_user),
+        ("is_pregnant", is_pregnant), ("is_nursing", is_nursing),
+    ]:
+        if flag_val is not None:
+            patient_data[flag_key] = flag_val.lower() == "true"
 
     if not profile_data and not patient_data:
         raise HTTPException(status_code=400, detail="No fields to update")
