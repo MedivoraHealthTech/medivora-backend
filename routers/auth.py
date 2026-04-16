@@ -304,6 +304,8 @@ async def update_user_profile(
     user_id: str,
     current_user=Depends(get_current_user),
     full_name: str = Form(default=None),
+    first_name: str = Form(default=None),
+    last_name: str = Form(default=None),
     email: str = Form(default=None),
     phone: str = Form(default=None),
     age: str = Form(default=None),
@@ -337,6 +339,10 @@ async def update_user_profile(
         _fn_parts = full_name.strip().split(" ", 1)
         profile_data["first_name"] = _fn_parts[0]
         profile_data["last_name"] = _fn_parts[1] if len(_fn_parts) > 1 else ""
+    if first_name is not None and first_name.strip():
+        profile_data["first_name"] = first_name.strip()
+    if last_name is not None and last_name.strip():
+        profile_data["last_name"] = last_name.strip()
     if email is not None and email.strip():
         profile_data["email"] = email.strip()
 
