@@ -371,7 +371,7 @@ async def _generate_session_title(message: str, ai_response: str = "") -> str:
             context += f'\nAI response: "{ai_response[:300]}"'
 
         response = client.models.generate_content(
-            model="gemini-2.0-flash-lite",
+            model="gemini-2.5-flash",
             contents=(
                 f'From this medical chat, extract a short condition/topic noun (2-4 words max). '
                 f'Return ONLY the noun phrase, nothing else. '
@@ -3096,7 +3096,7 @@ Rules:
 
         _client = _genai.Client(api_key=_os.getenv("GOOGLE_API_KEY"))
         response = _client.models.generate_content(
-            model="gemini-2.5-flash-lite",
+            model="gemini-2.5-flash",
             contents=prompt,
         )
         raw = response.text.strip()

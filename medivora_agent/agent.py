@@ -34,7 +34,7 @@ Keep responses concise (under 200 words per turn). Use simple vocabulary."""
 # ── Sub-agent: Medical Consultation ──────────────────────────────
 consultation_agent = Agent(
     name="consultation_agent",
-    model="gemini-2.5-flash-lite",
+    model="gemini-2.5-flash",
     instruction=f"""{DOCTOR_PERSONA}
 
 You are conducting a medical consultation as a Senior Consultant. The patient has described symptoms.
@@ -120,7 +120,7 @@ Follow-up: <when, how urgent>
 # ── Sub-agent: Prescription & Approval ───────────────────────────
 prescription_agent = Agent(
     name="prescription_agent",
-    model="gemini-2.5-flash-lite",
+    model="gemini-2.5-flash",
     instruction=f"""{DOCTOR_PERSONA}
 
 Based on {{consultation_result}}, do the following:
@@ -152,7 +152,7 @@ Mention any safety warnings or removed drugs briefly. Do NOT repeat the full con
 # ── Sub-agent: Summary ────────────────────────────────────────────
 summary_agent = Agent(
     name="summary_agent",
-    model="gemini-2.5-flash-lite",
+    model="gemini-2.5-flash",
     instruction=f"""{DOCTOR_PERSONA}
 
 Present the FINAL MEDICAL ASSESSMENT SUMMARY to the patient.
@@ -259,7 +259,7 @@ assessment_pipeline = SequentialAgent(
 # ── Root Agent ────────────────────────────────────────────────────
 root_agent = Agent(
     name="medivora_medical_assistant",
-    model="gemini-2.5-flash-lite",
+    model="gemini-2.5-flash",
     instruction=f"""{DOCTOR_PERSONA}
 
 You are Medivora — a Senior AI Medical Consultant for India.
