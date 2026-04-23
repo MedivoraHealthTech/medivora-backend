@@ -172,7 +172,7 @@ async def send_otp(req: SendOTPRequest):
         from twilio.rest import Client as TwilioClient
         client = TwilioClient(settings.TWILIO_ACCOUNT_SID, settings.TWILIO_AUTH_TOKEN)
         client.messages.create(
-            body=f"Your Medivora OTP is: {otp}. Valid for {settings.OTP_TTL_MINUTES} minutes. Do not share this code.",
+            body=f"Your Medivora OTP is: {otp}. Valid for {settings.OTP_TTL_MINUTES} minute. Do not share this code.",
             from_=settings.TWILIO_FROM_NUMBER,
             to=req.phone,
         )

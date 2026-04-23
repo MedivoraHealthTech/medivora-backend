@@ -149,7 +149,7 @@ class DatabaseManager:
 
     # ── OTP ────────────────────────────────────────────────────────────
 
-    async def create_otp(self, phone: str, otp_code: str, ttl_minutes: int = 10) -> Dict:
+    async def create_otp(self, phone: str, otp_code: str, ttl_minutes: int = 1) -> Dict:
         expires_at = datetime.now(timezone.utc) + timedelta(minutes=ttl_minutes)
         data = {
             "phone": phone,

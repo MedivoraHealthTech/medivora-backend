@@ -42,7 +42,7 @@ class Settings:
     LOCKOUT_WINDOW_MINUTES: int = int(os.getenv("LOCKOUT_WINDOW_MINUTES", "15"))
 
     # OTP
-    OTP_TTL_MINUTES: int = int(os.getenv("OTP_TTL_MINUTES", "10"))
+    OTP_TTL_MINUTES: int = int(os.getenv("OTP_TTL_MINUTES", "1"))
     OTP_MOCK_MODE: bool = os.getenv("OTP_MOCK_MODE", "true").lower() == "true"
 
     # Twilio (required when OTP_MOCK_MODE=false)

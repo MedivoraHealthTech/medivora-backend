@@ -181,6 +181,35 @@ async def dev_confirm_booking(
         raise HTTPException(status_code=500, detail=f"Could not create consultation: {e}")
 
     logger.info(f"dev_confirm: created consultation {session_id} for patient {patient_id}")
+
+    # Notify patient
+    try:
+        specialty_label = specialty.replace("_", " ").title() if specialty else "General Medicine"
+        doctor_display = "A doctor"
+        if resolved_doctor_id:
+            try:
+                doc_res = db.client.table("doctors") \
+                    .select("*, profiles(first_name, last_name)") \
+                    .eq("id", resolved_doctor_id).limit(1).execute()
+                if doc_res.data:
+                    prof = doc_res.data[0].get("profiles") or {}
+                    fn = (prof.get("first_name") or "").strip()
+                    ln = (prof.get("last_name") or "").strip()
+                    full = f"{fn} {ln}".strip()
+                    if full:
+                        doctor_display = f"Dr. {full}"
+            except Exception:
+                pass
+        db.client.table("notifications").insert({
+            "user_id":           actual_profile_id,
+            "notification_type": "consultation",
+            "title":             "Consultation Booked",
+            "message":           f"Your {specialty_label} consultation is confirmed. {doctor_display} has been assigned.",
+            "is_read":           False,
+        }).execute()
+    except Exception as e:
+        logger.warning(f"dev_confirm: notification insert failed: {e}")
+
     return {"status": "ok", "session_id": session_id}
 
 

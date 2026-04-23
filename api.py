@@ -883,7 +883,7 @@ async def send_otp(request: Request, phone: str = Form(...)):
         raise HTTPException(status_code=422, detail="Invalid phone number")
     otp = str(random.randint(100000, 999999))
     db = DatabaseManager()
-    await db.create_otp(phone, otp, ttl_minutes=10)
+    await db.create_otp(phone, otp, ttl_minutes=1)
     logger.info(f"OTP generated for {phone}: {otp}")
 
     # Check if a real SMS provider is configured
@@ -893,7 +893,7 @@ async def send_otp(request: Request, phone: str = Form(...)):
             from twilio.rest import Client as TwilioClient
             tc = TwilioClient(os.getenv("TWILIO_ACCOUNT_SID"), os.getenv("TWILIO_AUTH_TOKEN"))
             tc.messages.create(
-                body=f"Your Medivora OTP is: {otp}. Valid for 10 minutes.",
+                body=f"Your Medivora OTP is: {otp}. Valid for 1 minute.",
                 from_=os.getenv("TWILIO_FROM_NUMBER"),
                 to=phone,
             )
@@ -1691,7 +1691,7 @@ async def doctor_send_otp(request: Request, phone: str = Form(...)):
         raise HTTPException(status_code=422, detail="Invalid phone number")
     otp = str(random.randint(100000, 999999))
     db = DatabaseManager()
-    await db.create_otp(phone, otp, ttl_minutes=10)
+    await db.create_otp(phone, otp, ttl_minutes=1)
     logger.info(f"Doctor OTP generated for {phone}: {otp}")
     sms_provider = os.getenv("SMS_PROVIDER", "demo")
     if sms_provider == "twilio":
@@ -1699,7 +1699,7 @@ async def doctor_send_otp(request: Request, phone: str = Form(...)):
             from twilio.rest import Client as TwilioClient
             tc = TwilioClient(os.getenv("TWILIO_ACCOUNT_SID"), os.getenv("TWILIO_AUTH_TOKEN"))
             tc.messages.create(
-                body=f"Your Medivora Doctor Portal OTP is: {otp}. Valid for 10 minutes.",
+                body=f"Your Medivora Doctor Portal OTP is: {otp}. Valid for 1 minute.",
                 from_=os.getenv("TWILIO_FROM_NUMBER"),
                 to=phone,
             )
@@ -1882,9 +1882,9 @@ async def get_doctor_slots(doctor_id: str):
             except Exception:
                 continue
     else:
-        # Default: Mon–Sat 09:00–17:00
+        # Default: Mon–Sat 09:00–23:30
         for wday in range(6):
-            schedule[wday] = [(dtime(9, 0), dtime(17, 0))]
+            schedule[wday] = [(dtime(9, 0), dtime(23, 30))]
 
     slots: dict = {}
     for offset in range(7):
@@ -1897,7 +1897,7 @@ async def get_doctor_slots(doctor_id: str):
         for (start_t, end_t) in ranges:
             cursor = datetime.combine(d, start_t, tzinfo=IST_OFFSET)
             end    = datetime.combine(d, end_t,   tzinfo=IST_OFFSET)
-            while cursor < end:
+            while cursor <= end:
                 if cursor > now_ist + timedelta(minutes=15):
                     day_slots.append(cursor.strftime("%H:%M"))
                 cursor += INTERVAL
@@ -2924,23 +2924,45 @@ async def schedule_consultation(
     })
 
     # Notify patient about the (re)schedule
-    try:
-        patient_id = session.get("patient_id")
-        if patient_id:
-            from datetime import datetime as _dt
-            try:
-                formatted = _dt.fromisoformat(scheduled_at).strftime("%d %b %Y, %I:%M %p")
-            except Exception:
-                formatted = scheduled_at
+    patient_id = session.get("patient_id")
+    if patient_id:
+        from datetime import datetime as _dt
+        try:
+            formatted = _dt.fromisoformat(scheduled_at).strftime("%d %b %Y, %I:%M %p")
+        except Exception:
+            formatted = scheduled_at
+
+        # Best-effort: resolve doctor display name
+        doctor_display = "Your doctor"
+        try:
+            doctor_profile = await db.get_doctor_full_profile(current_user["sub"]) or {}
+            full_name = (doctor_profile.get("full_name") or "").strip()
+            if full_name:
+                doctor_display = f"Dr. {full_name}"
+        except Exception:
+            pass
+
+        # Send notification
+        try:
             await db.create_user_notification(
                 user_id=patient_id,
                 notification_type="consultation",
-                title="Consultation Scheduled",
-                message=f"Your consultation has been confirmed for {formatted}.",
+                title="Doctor Assigned",
+                message=f"{doctor_display} has been assigned to your consultation, confirmed for {formatted}.",
                 priority=2,
             )
-    except Exception:
-        pass
+        except Exception:
+            pass
+
+        # Update stale "A doctor will be assigned shortly" notifications
+        try:
+            db.client.table("notifications") \
+                .update({"message": f"{doctor_display} has been assigned to your consultation."}) \
+                .eq("user_id", patient_id) \
+                .ilike("message", "%doctor will be assigned shortly%") \
+                .execute()
+        except Exception:
+            pass
 
     return {"message": "Consultation scheduled", "session_id": session_id, "scheduled_at": scheduled_at}
 
@@ -3435,6 +3457,29 @@ async def dev_confirm_booking(
         "consultation_type": consultation_type,
         "created_at":        datetime.now().isoformat(),
     })
+
+    # Notify patient
+    try:
+        specialty_label = specialty.replace("_", " ").title() if specialty else "General Medicine"
+        doctor_display = "A doctor"
+        if doctor_id:
+            try:
+                doc = await db.get_doctor_full_profile(doctor_id) or {}
+                full_name = (doc.get("full_name") or "").strip()
+                if full_name:
+                    doctor_display = f"Dr. {full_name}"
+            except Exception:
+                pass
+        await db.create_user_notification(
+            user_id=current_user["sub"],
+            notification_type="consultation",
+            title="Consultation Booked",
+            message=f"Your {specialty_label} consultation is confirmed. {doctor_display} has been assigned.",
+            priority=2,
+        )
+    except Exception:
+        pass
+
     return {"status": "ok", "session_id": session_id}
 
 
