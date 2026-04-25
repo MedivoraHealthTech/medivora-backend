@@ -1782,6 +1782,39 @@ async def doctor_verify_otp(
     return {"message": "Account created", "doctor": doctor, "token": token, "role": "doctor", "new_doctor": True}
 
 
+@app.post("/doctors/login-via-supabase")
+async def doctor_login_via_supabase(current_user: Dict = Depends(get_current_user)):
+    """Exchange a verified Supabase JWT for a doctor JWT.
+
+    Called after the frontend completes Supabase Phone OTP verification.
+    The Supabase token proves phone ownership; we just look up the doctor record.
+    """
+    phone = (current_user.get("phone") or "").strip()
+    if not phone:
+        raise HTTPException(status_code=400, detail="Phone number not found in token.")
+    # Normalize to E.164
+    if not phone.startswith("+"):
+        phone = "+" + phone
+
+    db = DatabaseManager()
+
+    # Block patient accounts
+    existing = db.client.table("profiles").select("user_type").eq("phone", phone).limit(1).execute()
+    if existing.data and existing.data[0].get("user_type") == "patient":
+        raise HTTPException(
+            status_code=409,
+            detail="This phone number is registered as a patient account. Please use the patient login instead.",
+        )
+
+    doctor = await db.get_doctor_by_phone(phone)
+    if not doctor:
+        raise HTTPException(status_code=404, detail="No doctor account found for this number. Please contact admin.")
+
+    token = create_token(doctor["id"], role="doctor")
+    logger.info(f"Doctor Supabase OTP login: {phone}")
+    return {"message": "Login successful", "doctor": doctor, "token": token, "role": "doctor", "new_doctor": False}
+
+
 @app.post("/doctors/login")
 @limiter.limit("10/minute")
 async def doctor_login(
