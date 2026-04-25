@@ -1787,32 +1787,123 @@ async def doctor_login_via_supabase(current_user: Dict = Depends(get_current_use
     """Exchange a verified Supabase JWT for a doctor JWT.
 
     Called after the frontend completes Supabase Phone OTP verification.
-    The Supabase token proves phone ownership; we just look up the doctor record.
+    - Existing doctor → return JWT.
+    - New phone (no doctor record yet) → auto-create profile + doctor row, return JWT.
+    - Existing PATIENT with consultations → block (409).
     """
     phone = (current_user.get("phone") or "").strip()
     if not phone:
         raise HTTPException(status_code=400, detail="Phone number not found in token.")
-    # Normalize to E.164
     if not phone.startswith("+"):
         phone = "+" + phone
 
+    supabase_uid = current_user["sub"]
     db = DatabaseManager()
 
-    # Block patient accounts
-    existing = db.client.table("profiles").select("user_type").eq("phone", phone).limit(1).execute()
-    if existing.data and existing.data[0].get("user_type") == "patient":
-        raise HTTPException(
-            status_code=409,
-            detail="This phone number is registered as a patient account. Please use the patient login instead.",
-        )
+    # ── 1. Existing doctor → login ─────────────────────────────────────────
+    doctor = await db.get_doctor_by_phone(phone)
+    if doctor:
+        token = create_token(doctor["id"], role="doctor")
+        logger.info(f"Doctor Supabase OTP login: {phone}")
+        return {"message": "Login successful", "doctor": doctor, "token": token, "role": "doctor", "new_doctor": False}
+
+    # ── 2. Check for existing patient with real activity → block ───────────
+    # The handle_new_user trigger always creates a patient profile on first OTP.
+    # Only block if the patient has actual consultations (real patient usage).
+    try:
+        patient_row = db.client.table("patients").select("id").eq("profile_id", supabase_uid).limit(1).execute()
+        if patient_row.data:
+            consultations = (
+                db.client.table("consultations")
+                .select("id")
+                .eq("patient_id", patient_row.data[0]["id"])
+                .limit(1)
+                .execute()
+            )
+            if consultations.data:
+                raise HTTPException(
+                    status_code=409,
+                    detail="This number is registered as a patient account. Please use the patient login instead.",
+                )
+    except HTTPException:
+        raise
+    except Exception:
+        pass
+
+    # ── 3. Auto-create doctor account ──────────────────────────────────────
+    # Find the real profile for this phone. Two cases:
+    # a) Trigger created profiles(id=supabase_uid) for this OTP — use supabase_uid.
+    # b) Phone already existed in profiles (different id) — trigger skipped due to
+    #    ON CONFLICT; use the existing profile id.
+
+    phone_bare = phone.lstrip("+")
+    profile_row = None
+    for q_phone in [phone, phone_bare]:
+        res = db.client.table("profiles").select("id,user_type").eq("phone", q_phone).limit(1).execute()
+        if res.data:
+            profile_row = res.data[0]
+            break
+
+    if not profile_row:
+        # Trigger couldn't create a profile at all — create one now
+        try:
+            ins = db.client.table("profiles").insert({
+                "id":             supabase_uid,
+                "phone":          phone,
+                "user_type":      "doctor",
+                "role":           "doctor",
+                "password_hash":  "supabase_managed",
+                "status":         "active",
+                "phone_verified": True,
+            }).execute()
+            if ins.data:
+                profile_row = {"id": supabase_uid, "user_type": "doctor"}
+        except Exception as e:
+            logger.error(f"login-via-supabase: profile insert failed: {e}")
+            raise HTTPException(status_code=500, detail="Could not create doctor account.")
+
+    profile_id = profile_row["id"]
+
+    # Upgrade the profile to doctor type and normalise phone
+    try:
+        db.client.table("profiles").update({
+            "user_type":      "doctor",
+            "role":           "doctor",
+            "phone":          phone,
+            "phone_verified": True,
+        }).eq("id", profile_id).execute()
+    except Exception as e:
+        logger.error(f"login-via-supabase: profile upgrade failed: {e}")
+        raise HTTPException(status_code=500, detail="Could not upgrade profile to doctor.")
+
+    # Remove auto-created patient row (non-fatal if missing)
+    try:
+        db.client.table("patients").delete().eq("profile_id", profile_id).execute()
+    except Exception:
+        pass
+
+    # Create doctors row (skip if already exists)
+    try:
+        db.client.table("doctors").insert({
+            "profile_id":       profile_id,
+            "available_status": "offline",
+            "specialties":      [],
+            "available_slots":  [],
+        }).execute()
+    except Exception as e:
+        # Could be a duplicate (profile already has a doctors row) — check
+        existing_doc = db.client.table("doctors").select("id").eq("profile_id", profile_id).limit(1).execute()
+        if not existing_doc.data:
+            logger.error(f"login-via-supabase: doctors insert failed: {e}")
+            raise HTTPException(status_code=500, detail="Could not create doctor record.")
 
     doctor = await db.get_doctor_by_phone(phone)
     if not doctor:
-        raise HTTPException(status_code=404, detail="No doctor account found for this number. Please contact admin.")
+        raise HTTPException(status_code=500, detail="Doctor account created but could not be retrieved.")
 
     token = create_token(doctor["id"], role="doctor")
-    logger.info(f"Doctor Supabase OTP login: {phone}")
-    return {"message": "Login successful", "doctor": doctor, "token": token, "role": "doctor", "new_doctor": False}
+    logger.info(f"Doctor auto-created via Supabase OTP: {phone}")
+    return {"message": "Account created", "doctor": doctor, "token": token, "role": "doctor", "new_doctor": True}
 
 
 @app.post("/doctors/login")
