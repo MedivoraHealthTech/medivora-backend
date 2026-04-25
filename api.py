@@ -1689,8 +1689,17 @@ async def doctor_send_otp(request: Request, phone: str = Form(...)):
     phone = phone.strip()
     if not phone or len(phone) < 6:
         raise HTTPException(status_code=422, detail="Invalid phone number")
-    otp = str(random.randint(100000, 999999))
     db = DatabaseManager()
+
+    # Block if this phone is registered as a patient account
+    existing = db.client.table("profiles").select("user_type").eq("phone", phone).limit(1).execute()
+    if existing.data and existing.data[0].get("user_type") == "patient":
+        raise HTTPException(
+            status_code=409,
+            detail="This phone number is registered as a patient account. Please use the patient login instead.",
+        )
+
+    otp = str(random.randint(100000, 999999))
     await db.create_otp(phone, otp, ttl_minutes=1)
     logger.info(f"Doctor OTP generated for {phone}: {otp}")
     sms_provider = os.getenv("SMS_PROVIDER", "demo")
@@ -1734,6 +1743,15 @@ async def doctor_verify_otp(
     ok = await db.verify_otp(phone, otp)
     if not ok:
         raise HTTPException(status_code=401, detail="Invalid or expired OTP. Please request a new one.")
+
+    # Block if this phone is a patient account
+    existing = db.client.table("profiles").select("user_type").eq("phone", phone).limit(1).execute()
+    if existing.data and existing.data[0].get("user_type") == "patient":
+        raise HTTPException(
+            status_code=409,
+            detail="This phone number is registered as a patient account. Please use the patient login instead.",
+        )
+
     doctor = await db.get_doctor_by_phone(phone)
     if doctor:
         token = create_token(doctor["id"], role="doctor")
