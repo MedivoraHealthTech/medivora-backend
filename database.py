@@ -976,6 +976,8 @@ class DatabaseManager:
                 return None
             row = result.data[0]
             profile = row.pop("profiles", None) or {}
+            row["first_name"] = profile.get("first_name", "")
+            row["last_name"]  = profile.get("last_name", "")
             row["full_name"]  = _name(profile.get("first_name"), profile.get("last_name"))
             row["email"]      = row.get("email") or profile.get("email", "")
             row["phone"]      = row.get("phone") or profile.get("phone", "")

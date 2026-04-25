@@ -3449,6 +3449,7 @@ async def get_doctor_profile(current_user: Dict = Depends(require_doctor)):
 @app.put("/doctor/profile")
 async def update_doctor_profile_full(
     full_name:        str = Form(default=""),
+    email:            str = Form(default=""),
     clinic_name:      str = Form(default=""),
     clinic_address:   str = Form(default=""),
     clinic_phone:     str = Form(default=""),
@@ -3486,14 +3487,17 @@ async def update_doctor_profile_full(
     success = await db.update_doctor_profile(current_user["sub"], **updates)
     if not success:
         raise HTTPException(status_code=404, detail="Doctor profile not found.")
-    # If full_name was submitted, update first_name/last_name in the profiles table
+    # Update first_name / last_name / email in profiles table
+    profile_updates = {}
     if full_name and full_name.strip():
         fn_parts = full_name.strip().split(" ", 1)
+        profile_updates["first_name"] = fn_parts[0]
+        profile_updates["last_name"]  = fn_parts[1] if len(fn_parts) > 1 else ""
+    if email and email.strip():
+        profile_updates["email"] = email.strip()
+    if profile_updates:
         try:
-            db.client.table("profiles").update({
-                "first_name": fn_parts[0],
-                "last_name": fn_parts[1] if len(fn_parts) > 1 else "",
-            }).eq("id", current_user["sub"]).execute()
+            db.client.table("profiles").update(profile_updates).eq("id", current_user["sub"]).execute()
         except Exception:
             pass
     return {"message": "Profile updated successfully"}
