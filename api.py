@@ -2882,14 +2882,17 @@ async def patient_set_slot(
     if not session:
         raise HTTPException(status_code=404, detail="Consultation not found.")
 
-    # Ensure this consultation belongs to the requesting patient
+    # Ensure this consultation belongs to the requesting patient.
+    # profiles.id == Supabase auth UID after migration, so direct lookup suffices.
     user_id = current_user["sub"]
     stored_patient_id = session.get("patient_id", "")
+    resolved_id = user_id
     try:
         p_row = db.client.table("patients").select("id").eq("profile_id", user_id).limit(1).execute()
-        resolved_id = p_row.data[0]["id"] if p_row.data else user_id
+        if p_row.data:
+            resolved_id = p_row.data[0]["id"]
     except Exception:
-        resolved_id = user_id
+        pass
     if stored_patient_id not in (user_id, resolved_id):
         raise HTTPException(status_code=403, detail="Not authorized.")
 

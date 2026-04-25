@@ -49,6 +49,9 @@ class DatabaseManager:
         """Register a new patient user."""
         import bcrypt
         pw_hash = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+        phone = phone.strip() if phone else phone
+        if phone and not phone.startswith("+"):
+            phone = "+" + phone
         name_parts = (name or "").strip().split(" ", 1)
         data = {
             "phone": phone,
@@ -449,6 +452,9 @@ class DatabaseManager:
     async def create_admin(self, username: str, email: str, password: str, full_name: str) -> Dict:
         import bcrypt
         pw_hash = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+        username = username.strip() if username else username
+        if username and not username.startswith("+"):
+            username = "+" + username
         name_parts = (full_name or "").strip().split(" ", 1)
         data = {
             "phone": username,
@@ -505,14 +511,10 @@ class DatabaseManager:
     async def get_patient_consultations(self, patient_id: str, phone: str = "") -> List[Dict]:
         """Return all consultations for a patient.
 
-        Resolution order (handles dual-identity: Supabase OTP + custom profile):
-        1. patients.profile_id = auth_UID  (direct link)
-        2. profiles.phone lookup using phone from JWT → patients.profile_id = that profile.id
-        3. _ensure_profile_and_patient as last resort (creates rows if truly new user)
+        profiles.id == Supabase auth UID (enforced by handle_new_user trigger +
+        one-time migration), so a direct patients.profile_id lookup is all that's needed.
         """
         resolved_id = None
-
-        # 1. Direct profile_id lookup
         try:
             patient_row = (
                 self.client.table("patients")
@@ -526,41 +528,8 @@ class DatabaseManager:
         except Exception:
             pass
 
-        # 2. Phone-based fallback — handles Supabase OTP users whose custom profile
-        #    was created separately (different UUID) but has the same phone number
-        if not resolved_id and phone:
-            try:
-                # Normalise: Supabase stores phone without '+', profiles may store with '+'
-                phone_variants = [phone, f"+{phone}", phone.lstrip("+")]
-                for ph in phone_variants:
-                    profile_row = (
-                        self.client.table("profiles")
-                        .select("id")
-                        .eq("phone", ph)
-                        .limit(1)
-                        .execute()
-                    )
-                    if profile_row.data:
-                        profile_id = profile_row.data[0]["id"]
-                        pt_row = (
-                            self.client.table("patients")
-                            .select("id")
-                            .eq("profile_id", profile_id)
-                            .limit(1)
-                            .execute()
-                        )
-                        if pt_row.data:
-                            resolved_id = pt_row.data[0]["id"]
-                            break
-            except Exception:
-                pass
-
-        # 3. Last resort: ensure profile+patient exist for this auth UID
         if not resolved_id:
-            try:
-                resolved_id = self._ensure_profile_and_patient(patient_id)
-            except Exception:
-                resolved_id = patient_id
+            resolved_id = patient_id  # fallback; query will return []
 
         # Query consultations; enrich with doctor name via profiles join
         result = (

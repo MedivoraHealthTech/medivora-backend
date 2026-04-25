@@ -104,48 +104,15 @@ async def dev_confirm_booking(
     user_id = current_user["sub"]
     db = get_db()
 
-    # ── 1. Ensure profile row exists ─────────────────────────────────────
+    # ── 1. Resolve profile (profiles.id == Supabase auth UID after migration) ──
     profile = db.get_profile_by_id(user_id)
     if not profile:
-        # Try by phone (Supabase OTP users)
-        jwt_phone = (current_user.get("phone") or "").strip()
-        if jwt_phone and not jwt_phone.startswith("+"):
-            jwt_phone = "+" + jwt_phone
-        if jwt_phone:
-            profile = db.get_profile_by_phone(jwt_phone)
-        if not profile:
-            # Auto-create a minimal profile row keyed by the Supabase UID
-            import secrets, bcrypt as _bcrypt
-            pw_hash = _bcrypt.hashpw(secrets.token_hex(16).encode(), _bcrypt.gensalt()).decode()
-            try:
-                result = db.client.table("profiles").insert({
-                    "id":            user_id,
-                    "full_name":     "",
-                    "first_name":    "",
-                    "last_name":     "",
-                    "phone":         jwt_phone or f"supabase_{user_id[:8]}",
-                    "email":         (current_user.get("email") or None),
-                    "password_hash": pw_hash,
-                    "user_type":     "patient",
-                    "role":          "patient",
-                    "status":        "active",
-                }).execute()
-                profile = result.data[0] if result.data else None
-            except Exception as e:
-                logger.warning(f"dev_confirm: profile auto-create failed: {e}")
-        if not profile:
-            raise HTTPException(status_code=500, detail="Could not resolve patient profile.")
+        raise HTTPException(status_code=404, detail="Patient profile not found. Please log in again.")
 
-    actual_profile_id = profile["id"]
-
-    # ── 2. Ensure patient row exists ──────────────────────────────────────
-    patient = db.get_patient_by_profile_id(actual_profile_id)
+    # ── 2. Resolve patient row ─────────────────────────────────────────────
+    patient = db.get_patient_by_profile_id(user_id)
     if not patient:
-        try:
-            patient = db.create_patient(profile_id=actual_profile_id)
-        except Exception as e:
-            logger.warning(f"dev_confirm: patient auto-create failed: {e}")
-            raise HTTPException(status_code=500, detail="Could not resolve patient record.")
+        raise HTTPException(status_code=404, detail="Patient record not found.")
 
     patient_id = patient["id"]
 
@@ -202,7 +169,7 @@ async def dev_confirm_booking(
             except Exception:
                 pass
         db.client.table("notifications").insert({
-            "user_id":           actual_profile_id,
+            "user_id":           user_id,
             "notification_type": "consultation",
             "title":             "Consultation Booked",
             "message":           f"Your {specialty_label} consultation is confirmed. {doctor_display} has been assigned.",

@@ -40,6 +40,9 @@ class SupabaseDB:
             _parts = full_name.strip().split(" ", 1)
             first_name = _parts[0]
             last_name = _parts[1] if len(_parts) > 1 else ""
+        phone = phone.strip() if phone else phone
+        if phone and not phone.startswith("+"):
+            phone = "+" + phone
         data = {
             "phone": phone,
             "first_name": first_name,

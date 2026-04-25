@@ -37,6 +37,8 @@ def _get_client_ip(request: Request) -> str:
 
 
 # ── POST /auth/signup ─────────────────────────────────────────────────
+# Patient signup is handled by Supabase Phone OTP + handle_new_user DB trigger.
+# This endpoint remains for doctor onboarding only.
 
 @router.post("/signup")
 async def signup(req: SignupRequest):
@@ -96,38 +98,31 @@ async def signup(req: SignupRequest):
 
 @router.post("/login")
 async def login(req: LoginRequest, request: Request):
-    """Login with phone + password."""
+    """Login with phone + password — doctors and admins only.
+    Patient auth is handled entirely by Supabase Phone OTP."""
     db = get_db()
     ip = _get_client_ip(request)
 
+    profile = db.get_profile_by_phone(req.phone)
+    if not profile or profile.get("user_type") not in ("doctor", "admin"):
+        db.record_login_attempt(req.phone, "unknown", False, ip)
+        raise HTTPException(status_code=401, detail="Invalid phone or password.")
+
     # Check lockout
-    failed_count = db.count_failed_attempts(
-        req.phone, settings.LOCKOUT_WINDOW_MINUTES
-    )
+    failed_count = db.count_failed_attempts(req.phone, settings.LOCKOUT_WINDOW_MINUTES)
     if failed_count >= settings.MAX_LOGIN_ATTEMPTS:
         raise HTTPException(
             status_code=429,
             detail=f"Too many failed attempts. Try again in {settings.LOCKOUT_WINDOW_MINUTES} minutes.",
         )
 
-    # Find user
-    profile = db.get_profile_by_phone(req.phone)
-    if not profile:
-        db.record_login_attempt(req.phone, "unknown", False, ip)
-        raise HTTPException(status_code=401, detail="Invalid phone or password.")
-
-    # Verify password
     if not verify_password(req.password, profile["password_hash"]):
         db.record_login_attempt(req.phone, profile["user_type"], False, ip)
         raise HTTPException(status_code=401, detail="Invalid phone or password.")
 
-    # Check account status
     if profile["status"] != "active":
-        raise HTTPException(
-            status_code=403, detail=f"Account is {profile['status']}."
-        )
+        raise HTTPException(status_code=403, detail=f"Account is {profile['status']}.")
 
-    # Success
     db.record_login_attempt(req.phone, profile["user_type"], True, ip)
     db.update_last_login(profile["id"])
 
@@ -260,34 +255,8 @@ async def get_user_profile(
 
     db = get_db()
 
-    # Resolve profile: Supabase UID may differ from our profiles.id
+    # profiles.id == Supabase auth UID after migration — direct lookup only.
     profile = db.get_profile_by_id(user_id)
-    if not profile:
-        jwt_phone = (current_user.get("phone") or "").strip()
-        if jwt_phone:
-            if not jwt_phone.startswith("+"):
-                jwt_phone = "+" + jwt_phone
-            profile = db.get_profile_by_phone(jwt_phone)
-        if not profile:
-            # Auto-create minimal profile for first-time Supabase auth users
-            import secrets, bcrypt  # noqa: E401
-            pw_hash = bcrypt.hashpw(secrets.token_hex(16).encode(), bcrypt.gensalt()).decode()
-            email = (current_user.get("email") or "").strip()
-            try:
-                result = db.client.table("profiles").insert({
-                    "id":            user_id,
-                    "first_name":    "",
-                    "last_name":     "",
-                    "phone":         jwt_phone or f"supabase_{user_id[:8]}",
-                    "email":         email or None,
-                    "password_hash": pw_hash,
-                    "user_type":     "patient",
-                    "role":          "patient",
-                }).execute()
-                profile = result.data[0] if result.data else None
-            except Exception:
-                pass
-
     if not profile:
         raise HTTPException(status_code=404, detail="User not found")
 
@@ -402,34 +371,11 @@ async def update_user_profile(
     if not profile_data and not patient_data:
         raise HTTPException(status_code=400, detail="No fields to update")
 
-    # Resolve actual profiles row. Supabase OTP users have a different UID than
-    # the UUID in our profiles table — fall back to phone lookup when needed.
+    # profiles.id == Supabase auth UID after migration — direct lookup only.
     actual_profile_id = user_id
     existing_profile = db.get_profile_by_id(user_id)
     if not existing_profile:
-        jwt_phone = (current_user.get("phone") or "").strip()
-        if jwt_phone:
-            if not jwt_phone.startswith("+"):
-                jwt_phone = "+" + jwt_phone
-            phone_profile = db.get_profile_by_phone(jwt_phone)
-            if phone_profile:
-                actual_profile_id = phone_profile["id"]
-                existing_profile = phone_profile
-        if not existing_profile:
-            jwt_phone = jwt_phone or f"+placeholder_{user_id[:8]}"
-            _placeholder_parts = ((full_name or "").strip()).split(" ", 1) if (full_name or "").strip() else ["", ""]
-            db.client.table("profiles").insert({
-                "id": user_id,
-                "phone": jwt_phone,
-                "first_name": _placeholder_parts[0],
-                "last_name": _placeholder_parts[1] if len(_placeholder_parts) > 1 else "",
-                "password_hash": "supabase_managed",
-                "user_type": "patient",
-                "role": "patient",
-                "status": "active",
-            }).execute()
-            profile_data.pop("first_name", None)
-            profile_data.pop("last_name", None)
+        raise HTTPException(status_code=404, detail="Profile not found.")
 
     if profile_data:
         # If email is taken by a ghost placeholder profile, clear it first.
