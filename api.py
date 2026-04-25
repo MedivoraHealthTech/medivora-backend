@@ -1865,9 +1865,9 @@ async def get_doctor_slots(doctor_id: str):
         "friday": 4, "saturday": 5, "sunday": 6,
     }
 
-    # Build a map of weekday_number -> list of (start_time, end_time)
+    # Build a map of weekday_number -> list of (start_time, end_time, slot_type)
     available_slots = doctor.get("available_slots") if doctor else None
-    schedule: dict = {}  # {0: [(dtime(9,0), dtime(17,0))], ...}
+    schedule: dict = {}  # {0: [(dtime(9,0), dtime(17,0), "both")], ...}
 
     if available_slots and isinstance(available_slots, list) and len(available_slots) > 0:
         for entry in available_slots:
@@ -1878,13 +1878,16 @@ async def get_doctor_slots(doctor_id: str):
             try:
                 sh, sm = map(int, str(entry.get("start", "09:00")).split(":"))
                 eh, em = map(int, str(entry.get("end",   "17:00")).split(":"))
-                schedule.setdefault(wday, []).append((dtime(sh, sm), dtime(eh, em)))
+                slot_type = str(entry.get("type", "both")).strip().lower()
+                if slot_type not in ("online", "offline", "both"):
+                    slot_type = "both"
+                schedule.setdefault(wday, []).append((dtime(sh, sm), dtime(eh, em), slot_type))
             except Exception:
                 continue
     else:
-        # Default: Mon–Sat 09:00–23:30
+        # Default: Mon–Sat 09:00–23:30, both
         for wday in range(6):
-            schedule[wday] = [(dtime(9, 0), dtime(23, 30))]
+            schedule[wday] = [(dtime(9, 0), dtime(23, 30), "both")]
 
     slots: dict = {}
     for offset in range(7):
@@ -1894,12 +1897,12 @@ async def get_doctor_slots(doctor_id: str):
             continue
 
         day_slots = []
-        for (start_t, end_t) in ranges:
+        for (start_t, end_t, slot_type) in ranges:
             cursor = datetime.combine(d, start_t, tzinfo=IST_OFFSET)
             end    = datetime.combine(d, end_t,   tzinfo=IST_OFFSET)
             while cursor <= end:
                 if cursor > now_ist + timedelta(minutes=15):
-                    day_slots.append(cursor.strftime("%H:%M"))
+                    day_slots.append({"time": cursor.strftime("%H:%M"), "type": slot_type})
                 cursor += INTERVAL
 
         if day_slots:
@@ -2867,8 +2870,9 @@ async def doctor_consultations(current_user: Dict = Depends(require_doctor)):
 
 @app.patch("/consultation/{session_id}/slot")
 async def patient_set_slot(
-    session_id:   str,
-    scheduled_at: str = Form(...),
+    session_id:        str,
+    scheduled_at:      str = Form(...),
+    consultation_type: str = Form(default=""),
     current_user: Dict = Depends(get_current_user),
 ):
     """Patient selects their appointment slot after payment is confirmed."""
@@ -2888,7 +2892,11 @@ async def patient_set_slot(
     if stored_patient_id not in (user_id, resolved_id):
         raise HTTPException(status_code=403, detail="Not authorized.")
 
-    await db.update_consultation(session_id, {"scheduled_at": scheduled_at})
+    update = {"scheduled_at": scheduled_at}
+    if consultation_type in ("video", "in_person"):
+        update["consultation_type"] = consultation_type
+
+    await db.update_consultation(session_id, update)
 
     try:
         from datetime import datetime as _dt
@@ -2896,7 +2904,7 @@ async def patient_set_slot(
     except Exception:
         formatted = scheduled_at
 
-    logger.info(f"Patient {user_id} set slot for consultation {session_id}: {formatted}")
+    logger.info(f"Patient {user_id} set slot for consultation {session_id}: {formatted} ({consultation_type or 'type unchanged'})")
     return {"message": "Slot saved", "session_id": session_id, "scheduled_at": scheduled_at}
 
 
