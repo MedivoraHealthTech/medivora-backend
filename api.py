@@ -2687,7 +2687,8 @@ async def request_consultation(
 async def my_consultations(current_user: Dict = Depends(get_current_user)):
     """Patient: list own consultation history."""
     db = DatabaseManager()
-    sessions = await db.get_patient_consultations(current_user["sub"])
+    phone = current_user.get("phone", "")
+    sessions = await db.get_patient_consultations(current_user["sub"], phone=phone)
     return {"sessions": sessions}
 
 

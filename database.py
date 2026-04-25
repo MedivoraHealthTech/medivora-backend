@@ -502,12 +502,17 @@ class DatabaseManager:
         )
         return result.data[0] if result.data else None
 
-    async def get_patient_consultations(self, patient_id: str) -> List[Dict]:
+    async def get_patient_consultations(self, patient_id: str, phone: str = "") -> List[Dict]:
         """Return all consultations for a patient.
-        patient_id may be either the Supabase auth UID (= profiles.id)
-        or the patients.id UUID — we resolve both cases.
+
+        Resolution order (handles dual-identity: Supabase OTP + custom profile):
+        1. patients.profile_id = auth_UID  (direct link)
+        2. profiles.phone lookup using phone from JWT → patients.profile_id = that profile.id
+        3. _ensure_profile_and_patient as last resort (creates rows if truly new user)
         """
-        # 1. Try to resolve via profile_id → patients.id
+        resolved_id = None
+
+        # 1. Direct profile_id lookup
         try:
             patient_row = (
                 self.client.table("patients")
@@ -516,11 +521,48 @@ class DatabaseManager:
                 .limit(1)
                 .execute()
             )
-            resolved_id = patient_row.data[0]["id"] if patient_row.data else patient_id
+            if patient_row.data:
+                resolved_id = patient_row.data[0]["id"]
         except Exception:
-            resolved_id = patient_id
+            pass
 
-        # 2. Query consultations; enrich with doctor name via profiles join
+        # 2. Phone-based fallback — handles Supabase OTP users whose custom profile
+        #    was created separately (different UUID) but has the same phone number
+        if not resolved_id and phone:
+            try:
+                # Normalise: Supabase stores phone without '+', profiles may store with '+'
+                phone_variants = [phone, f"+{phone}", phone.lstrip("+")]
+                for ph in phone_variants:
+                    profile_row = (
+                        self.client.table("profiles")
+                        .select("id")
+                        .eq("phone", ph)
+                        .limit(1)
+                        .execute()
+                    )
+                    if profile_row.data:
+                        profile_id = profile_row.data[0]["id"]
+                        pt_row = (
+                            self.client.table("patients")
+                            .select("id")
+                            .eq("profile_id", profile_id)
+                            .limit(1)
+                            .execute()
+                        )
+                        if pt_row.data:
+                            resolved_id = pt_row.data[0]["id"]
+                            break
+            except Exception:
+                pass
+
+        # 3. Last resort: ensure profile+patient exist for this auth UID
+        if not resolved_id:
+            try:
+                resolved_id = self._ensure_profile_and_patient(patient_id)
+            except Exception:
+                resolved_id = patient_id
+
+        # Query consultations; enrich with doctor name via profiles join
         result = (
             self.client.table("consultations")
             .select("*, doctors(id, specialties, consultation_fee, clinic_address, profiles(first_name, last_name))")
@@ -979,21 +1021,19 @@ class DatabaseManager:
         """Create a consultation record (from consultation/request endpoint)."""
         try:
             import uuid as _uuid
-            # Resolve patient_id if it's a Supabase auth UID
-            patient_id = data.get("patient_id")
-            if patient_id:
+            # Resolve patient_id: always ensure a valid patients row exists
+            user_id = data.get("patient_id")
+            if user_id:
                 try:
-                    patient_row = (
-                        self.client.table("patients")
-                        .select("id")
-                        .eq("profile_id", patient_id)
-                        .limit(1)
-                        .execute()
+                    patient_id = self._ensure_profile_and_patient(
+                        user_id,
+                        name=data.get("patient_name", ""),
+                        email=data.get("patient_email", ""),
                     )
-                    if patient_row.data:
-                        patient_id = patient_row.data[0]["id"]
                 except Exception:
-                    pass
+                    patient_id = user_id  # last-resort fallback
+            else:
+                patient_id = user_id
 
             record = {
                 "id":                data.get("id", str(_uuid.uuid4())),
