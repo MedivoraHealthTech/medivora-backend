@@ -1477,6 +1477,10 @@ async def get_my_prescriptions(current_user: Dict = Depends(get_current_user)):
             doc = await db.get_prescription_document(a["approval_id"])
             a["has_pdf"] = doc is not None
             a["download_available"] = doc is not None and not doc.get("download_used", False)
+            a["download_url"] = (
+                f"{settings.backend_base_url}/prescriptions/{a['approval_id']}/download"
+                if doc is not None else None
+            )
 
             # Phase C: Mask prescription content for unapproved items
             if a.get("status") in ("pending_approval", "provisional"):
@@ -2659,7 +2663,7 @@ async def generate_pdf(approval_id: str, current_user: Dict = Depends(require_do
         return {
             "message": "PDF generated successfully",
             "approval_id": approval_id,
-            "download_url": f"/prescriptions/{approval_id}/download",
+            "download_url": f"{settings.backend_base_url}/prescriptions/{approval_id}/download",
             "verification_url": verification_url,
         }
     except HTTPException:
@@ -2671,23 +2675,56 @@ async def generate_pdf(approval_id: str, current_user: Dict = Depends(require_do
 
 @app.get("/prescriptions/{approval_id}/download")
 async def download_prescription_pdf(approval_id: str, current_user: Dict = Depends(get_current_user)):
-    """Download the prescription PDF (authenticated user)"""
+    """Download the prescription PDF (authenticated user).
+    If the file is missing (e.g. Railway ephemeral filesystem), regenerates from DB.
+    """
     try:
         db = DatabaseManager()
         doc = await db.get_prescription_document(approval_id)
-        if not doc:
+
+        pdf_path = doc.get("pdf_path") if doc else None
+
+        # ── Serve cached file if it exists ───────────────────────────
+        if pdf_path and os.path.exists(pdf_path):
+            if doc.get("download_token"):
+                await db.mark_download_used(doc["download_token"])
+            return FileResponse(
+                path=pdf_path,
+                filename=f"prescription_{approval_id}.pdf",
+                media_type="application/pdf",
+            )
+
+        # ── File missing — regenerate from approval + doctor data ────
+        logger.info(f"PDF file missing for approval {approval_id}, regenerating from DB data")
+        approval = await db.get_approval_by_id(approval_id)
+        if not approval:
             raise HTTPException(status_code=404, detail="PDF not found. Please ask the doctor to generate it.")
 
-        pdf_path = doc["pdf_path"]
-        if not os.path.exists(pdf_path):
-            raise HTTPException(status_code=404, detail="PDF file not found on server")
+        doctor_id = approval.get("approved_by") or approval.get("assigned_doctor")
+        doctor_profile = {}
+        if doctor_id:
+            doctor_profile = await db.get_doctor_full_profile(doctor_id) or {}
 
-        # Mark as downloaded (but allow re-download)
-        if doc.get("download_token"):
+        new_pdf_path = generate_prescription_pdf(
+            approval_data=approval,
+            doctor_data=doctor_profile,
+            approval_id=approval_id,
+            signature_hash=doc.get("signature_hash", "") if doc else "",
+            verification_url=doc.get("verification_url", "") if doc else "",
+        )
+
+        # Persist updated path
+        try:
+            if doc:
+                await db.save_prescription_document({**doc, "pdf_path": new_pdf_path})
+        except Exception:
+            pass
+
+        if doc and doc.get("download_token"):
             await db.mark_download_used(doc["download_token"])
 
         return FileResponse(
-            path=pdf_path,
+            path=new_pdf_path,
             filename=f"prescription_{approval_id}.pdf",
             media_type="application/pdf",
         )
@@ -2703,18 +2740,113 @@ async def download_prescription_pdf_direct(
     prescription_id: str,
     current_user: Dict = Depends(get_current_user),
 ):
-    """Download a prescription PDF by prescription ID (patient or doctor)."""
+    """Download a prescription PDF by prescription ID (patient or doctor).
+    If the file is missing (e.g. on a fresh server / Railway deploy), it is
+    regenerated on-the-fly from the data stored in the database.
+    """
+    import json as _json
     try:
         db = DatabaseManager()
-        result = db.client.table("prescriptions").select("pdf_url, patient_id").eq("id", prescription_id).limit(1).execute()
+
+        # ── Fetch full prescription + items ──────────────────────────
+        result = db.client.table("prescriptions").select(
+            "*, prescription_items(*)"
+        ).eq("id", prescription_id).limit(1).execute()
         if not result.data:
             raise HTTPException(status_code=404, detail="Prescription not found.")
         rx = result.data[0]
+
         pdf_path = rx.get("pdf_url")
-        if not pdf_path or not os.path.exists(pdf_path):
-            raise HTTPException(status_code=404, detail="PDF not yet generated for this prescription.")
+
+        # ── Serve the cached file if it exists ───────────────────────
+        if pdf_path and os.path.exists(pdf_path):
+            return FileResponse(
+                path=pdf_path,
+                filename=f"prescription_{prescription_id}.pdf",
+                media_type="application/pdf",
+            )
+
+        # ── File missing — regenerate from DB data ───────────────────
+        logger.info(f"PDF file missing for {prescription_id}, regenerating from DB data")
+
+        # Resolve doctor details
+        doctor_id = rx.get("prescribed_by_doctor_id")
+        doctor_profile = {}
+        if doctor_id:
+            doctor_profile = await db.get_doctor_full_profile(doctor_id) or {}
+
+        doctor_name    = doctor_profile.get("name", "Doctor")
+        doctor_specialty = doctor_profile.get("specialty", "General Medicine")
+        nmc_number     = doctor_profile.get("nmc_number", "")
+
+        # Resolve patient details via consultation if available
+        patient_name   = "Patient"
+        patient_age    = 0
+        patient_gender = ""
+        consultation_id = rx.get("consultation_id")
+        if consultation_id:
+            consultation = await db.get_consultation_with_patient(consultation_id)
+            if consultation:
+                patient_name   = consultation.get("patient_name", "Patient")
+                patient_age    = consultation.get("patient_age") or 0
+                patient_gender = consultation.get("patient_gender", "")
+                doctor_specialty = consultation.get("specialty") or doctor_specialty
+
+        # Parse JSONB fields (may be stored as JSON strings)
+        def _parse_list(val):
+            if isinstance(val, list):
+                return val
+            if isinstance(val, str):
+                try:
+                    return _json.loads(val)
+                except Exception:
+                    return [val]
+            return []
+
+        general_instructions   = _parse_list(rx.get("general_instructions", []))
+        dietary_advice         = _parse_list(rx.get("dietary_advice", []))
+        warning_signs          = _parse_list(rx.get("warning_signs", []))
+        follow_up_instructions = rx.get("follow_up_instructions", "")
+
+        # Build medication list from prescription_items
+        raw_items = rx.get("prescription_items") or []
+        med_list = [
+            {
+                "name":         item.get("medicine_name", ""),
+                "generic_name": item.get("generic_name", ""),
+                "dosage":       item.get("dosage", ""),
+                "frequency":    item.get("frequency", ""),
+                "duration":     item.get("duration", ""),
+                "instructions": item.get("instructions", ""),
+                "before_food":  item.get("before_food"),
+            }
+            for item in raw_items
+        ]
+
+        new_pdf_path = generate_prescription_pdf(
+            patient_name           = patient_name,
+            patient_age            = patient_age,
+            patient_gender         = patient_gender,
+            doctor_name            = doctor_name,
+            doctor_specialty       = doctor_specialty,
+            nmc_number             = nmc_number,
+            medications            = med_list,
+            general_instructions   = general_instructions,
+            dietary_advice         = dietary_advice,
+            warning_signs          = warning_signs,
+            follow_up_instructions = follow_up_instructions,
+            approval_id            = prescription_id,
+            signature_hash         = rx.get("digital_signature", ""),
+        )
+
+        # Persist the newly generated path so future downloads are instant
+        try:
+            db.client.table("prescriptions").update({"pdf_url": new_pdf_path}).eq("id", prescription_id).execute()
+        except Exception:
+            pass  # Non-fatal — file is still served this request
+
         return FileResponse(
-            path=pdf_path,
+            path=new_pdf_path,
             filename=f"prescription_{prescription_id}.pdf",
             media_type="application/pdf",
         )
@@ -3433,7 +3565,51 @@ async def submit_consultation_prescription(
         "prescription_id": rx_id,
         "prescription_number": rx_number,
         "signature_hash": sig_hash,
+        "download_url": (
+            f"{settings.backend_base_url}/prescriptions/{rx_id}/download-pdf"
+            if pdf_path else None
+        ),
     }
+
+
+@app.get("/doctor/prescriptions")
+async def get_doctor_prescriptions(current_user: Dict = Depends(require_doctor)):
+    """Return all prescriptions submitted by this doctor (consultation flow)."""
+    try:
+        db = DatabaseManager()
+        doctor_id = await db.resolve_doctor_id(current_user["sub"])
+        result = db.client.table("prescriptions").select(
+            "*, prescription_items(*)"
+        ).eq("prescribed_by_doctor_id", doctor_id).order("created_at", desc=True).execute()
+        prescriptions = result.data or []
+
+        # Enrich with patient name via consultation
+        import json as _json
+        for rx in prescriptions:
+            # Parse JSONB list fields stored as strings
+            for field in ("general_instructions", "dietary_advice", "warning_signs"):
+                val = rx.get(field)
+                if isinstance(val, str):
+                    try:
+                        rx[field] = _json.loads(val)
+                    except Exception:
+                        rx[field] = [val]
+
+            patient_name = "Patient"
+            consultation_id = rx.get("consultation_id")
+            if consultation_id:
+                try:
+                    c = await db.get_consultation_with_patient(consultation_id)
+                    if c:
+                        patient_name = c.get("patient_name", "Patient")
+                except Exception:
+                    pass
+            rx["patient_name"] = patient_name
+
+        return {"prescriptions": prescriptions, "count": len(prescriptions)}
+    except Exception as e:
+        logger.error(f"get_doctor_prescriptions error: {e}")
+        raise HTTPException(status_code=500, detail="Error retrieving prescriptions")
 
 
 @app.get("/doctor/profile")

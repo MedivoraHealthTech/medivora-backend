@@ -77,6 +77,10 @@ class Settings:
     def verification_base_url(self):
         return os.getenv("VERIFICATION_BASE_URL", "https://your-api.onrender.com/verify")
 
+    @property
+    def backend_base_url(self):
+        return os.getenv("BACKEND_BASE_URL", "https://medivora-backend-production.up.railway.app")
+
 
 # Alias so `from config import Config` works (api.py imports Config)
 Config = Settings

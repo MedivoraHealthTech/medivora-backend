@@ -149,10 +149,8 @@ Mention any safety warnings or removed drugs briefly. Do NOT repeat the full con
 
 
 # ── Sub-agent: Summary ────────────────────────────────────────────
-summary_agent = Agent(
-    name="summary_agent",
-    model="gemini-2.5-flash",
-    instruction=f"""{DOCTOR_PERSONA}
+def _summary_instruction(_context=None) -> str:
+    return f"""{DOCTOR_PERSONA}
 
 Present the FINAL MEDICAL ASSESSMENT SUMMARY to the patient.
 Use {{consultation_result}} and {{prescription_result}}.
@@ -241,7 +239,13 @@ CRITICAL RULES — NEVER VIOLATE
 5. Match patient's language — English / Hinglish / Devanagari. Medical terms stay in English.
 6. Be specific — "traumatic knee injury" not "injury"
 7. Output ONLY the sections shown above — no extra sections, no routing blocks, no follow-up, no horizontal dividers
-""",
+"""
+
+
+summary_agent = Agent(
+    name="summary_agent",
+    model="gemini-2.5-flash",
+    instruction=_summary_instruction,
     tools=[],
     output_key="summary_result",
 )
