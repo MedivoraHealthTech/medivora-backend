@@ -858,5 +858,17 @@ CREATE POLICY "Service role full access" ON otp_tokens             FOR ALL USING
 CREATE POLICY "Service role full access" ON login_attempts         FOR ALL USING (true) WITH CHECK (true);
 CREATE POLICY "Service role full access" ON prescription_documents FOR ALL USING (true) WITH CHECK (true);
 CREATE POLICY "Service role full access" ON prescription_edit_log  FOR ALL USING (true) WITH CHECK (true);
+
+-- ─── Doctor Waitlist ──────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS doctor_waitlist (
+    id         UUID        DEFAULT uuid_generate_v4() PRIMARY KEY,
+    name       TEXT        NOT NULL,
+    phone      TEXT        NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+ALTER TABLE doctor_waitlist ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Service role full access" ON doctor_waitlist FOR ALL USING (true) WITH CHECK (true);
+
 -- DONE! All tables created with indexes, triggers, and RLS policies.
 -- ═══════════════════════════════════════════════════════════════════════════

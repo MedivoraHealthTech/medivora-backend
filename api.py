@@ -4164,6 +4164,31 @@ async def payment_callback(request: Request):
         return RedirectResponse(f"{frontend_url}/payment?error=booking_failed", status_code=303)
 
 
+# ─── Doctor Waitlist ──────────────────────────────────────────────────────────
+
+class DoctorWaitlistRequest(BaseModel):
+    name: str
+    phone: str
+
+@app.post("/waitlist/doctor")
+@limiter.limit("10/minute")
+async def join_doctor_waitlist(request: Request, body: DoctorWaitlistRequest):
+    """Register a doctor's interest via the landing-page waitlist form."""
+    name = body.name.strip()
+    phone = body.phone.strip()
+    if not name:
+        raise HTTPException(status_code=422, detail="Name is required.")
+    if not phone:
+        raise HTTPException(status_code=422, detail="Phone number is required.")
+    try:
+        db = DatabaseManager()
+        entry = await db.add_to_doctor_waitlist(name=name, phone=phone)
+        return {"status": "ok", "id": entry.get("id")}
+    except Exception as e:
+        logger.error(f"Doctor waitlist insert failed: {e}")
+        raise HTTPException(status_code=500, detail="Could not save your details. Please try again.")
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":

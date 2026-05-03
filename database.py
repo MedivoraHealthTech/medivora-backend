@@ -1423,3 +1423,13 @@ class DatabaseManager:
                 logger.warning(f"create_prescription_with_items: item insert failed: {e}")
 
         return saved_rx
+
+    # ─── Doctor Waitlist ───────────────────────────────────────────────────────
+
+    async def add_to_doctor_waitlist(self, name: str, phone: str) -> Dict:
+        """Insert a doctor into the waitlist table."""
+        result = self.client.table("doctor_waitlist").insert({
+            "name": name,
+            "phone": phone,
+        }).execute()
+        return result.data[0] if result.data else {}
