@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Depends, BackgroundTasks, Request
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Depends, BackgroundTasks, Request, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -1381,6 +1381,83 @@ async def admin_list_prescriptions(current_admin: Dict = Depends(require_admin))
     except Exception as e:
         logger.error(f"Error listing prescriptions: {e}")
         raise HTTPException(status_code=500, detail="Error retrieving prescriptions")
+
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# FAMILY MEMBERS
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.get("/family-members")
+async def list_family_members(current_user: Dict = Depends(require_patient)):
+    """List all family members for the authenticated patient."""
+    try:
+        db = DatabaseManager()
+        patient_id = await db._resolve_patient_id(current_user["sub"])
+        if not patient_id:
+            raise HTTPException(status_code=404, detail="Patient record not found")
+        members = await db.get_family_members(patient_id)
+        return {"members": members}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error listing family members: {e}")
+        raise HTTPException(status_code=500, detail="Error retrieving family members")
+
+
+@app.post("/family-members")
+async def add_family_member(body: Dict = Body(...), current_user: Dict = Depends(require_patient)):
+    """Add a new family member."""
+    try:
+        if not body.get("name", "").strip():
+            raise HTTPException(status_code=422, detail="Name is required")
+        db = DatabaseManager()
+        patient_id = await db._resolve_patient_id(current_user["sub"])
+        if not patient_id:
+            raise HTTPException(status_code=404, detail="Patient record not found")
+        member = await db.create_family_member(patient_id, body)
+        return {"member": member}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error adding family member: {e}")
+        raise HTTPException(status_code=500, detail="Error adding family member")
+
+
+@app.put("/family-members/{member_id}")
+async def update_family_member(member_id: str, body: Dict = Body(...), current_user: Dict = Depends(require_patient)):
+    """Update an existing family member."""
+    try:
+        db = DatabaseManager()
+        patient_id = await db._resolve_patient_id(current_user["sub"])
+        if not patient_id:
+            raise HTTPException(status_code=404, detail="Patient record not found")
+        member = await db.update_family_member(member_id, patient_id, body)
+        if not member:
+            raise HTTPException(status_code=404, detail="Family member not found")
+        return {"member": member}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating family member: {e}")
+        raise HTTPException(status_code=500, detail="Error updating family member")
+
+
+@app.delete("/family-members/{member_id}")
+async def delete_family_member(member_id: str, current_user: Dict = Depends(require_patient)):
+    """Delete a family member."""
+    try:
+        db = DatabaseManager()
+        patient_id = await db._resolve_patient_id(current_user["sub"])
+        if not patient_id:
+            raise HTTPException(status_code=404, detail="Patient record not found")
+        await db.delete_family_member(member_id, patient_id)
+        return {"message": "Family member deleted"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting family member: {e}")
+        raise HTTPException(status_code=500, detail="Error deleting family member")
 
 
 @app.get("/patient/{phone}")

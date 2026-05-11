@@ -505,6 +505,54 @@ class DatabaseManager:
             return admin
         return None
 
+    # ── FAMILY MEMBERS ─────────────────────────────────────────────────
+
+    async def get_family_members(self, patient_id: str) -> List[Dict]:
+        result = (
+            self.client.table("family_members")
+            .select("*")
+            .eq("patient_id", patient_id)
+            .order("created_at")
+            .execute()
+        )
+        return result.data or []
+
+    async def create_family_member(self, patient_id: str, data: Dict) -> Optional[Dict]:
+        row = {
+            "patient_id":          patient_id,
+            "name":                data.get("name", ""),
+            "age":                 data.get("age"),
+            "gender":              data.get("gender"),
+            "relationship":        data.get("relationship"),
+            "blood_group":         data.get("blood_group"),
+            "medical_history":     data.get("medical_history"),
+            "allergies":           data.get("allergies"),
+            "current_medications": data.get("current_medications"),
+        }
+        result = self.client.table("family_members").insert(row).execute()
+        return result.data[0] if result.data else None
+
+    async def update_family_member(self, member_id: str, patient_id: str, data: Dict) -> Optional[Dict]:
+        updates = {}
+        for field in ("name", "age", "gender", "relationship", "blood_group",
+                      "medical_history", "allergies", "current_medications"):
+            if field in data:
+                updates[field] = data[field]
+        if not updates:
+            return None
+        result = (
+            self.client.table("family_members")
+            .update(updates)
+            .eq("id", member_id)
+            .eq("patient_id", patient_id)   # ownership check
+            .execute()
+        )
+        return result.data[0] if result.data else None
+
+    async def delete_family_member(self, member_id: str, patient_id: str) -> bool:
+        self.client.table("family_members").delete().eq("id", member_id).eq("patient_id", patient_id).execute()
+        return True
+
     async def get_system_stats(self) -> Dict:
         patients = self.client.table("profiles").select("id", count="exact").eq("user_type", "patient").execute()
         doctors = self.client.table("doctors").select("id", count="exact").execute()

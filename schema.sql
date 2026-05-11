@@ -870,5 +870,34 @@ CREATE TABLE IF NOT EXISTS doctor_waitlist (
 ALTER TABLE doctor_waitlist ENABLE ROW LEVEL SECURITY;
 CREATE POLICY "Service role full access" ON doctor_waitlist FOR ALL USING (true) WITH CHECK (true);
 
+-- ─────────────────────────────────────────────────────────────────────────
+-- TABLE: family_members — patient's family / dependents
+-- ─────────────────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS family_members (
+    id                   UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    patient_id           UUID NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
+
+    name                 VARCHAR(255) NOT NULL,
+    age                  INT,
+    gender               VARCHAR(20),
+    relationship         VARCHAR(50),   -- spouse, child, parent, sibling, other
+
+    blood_group          VARCHAR(10),
+    medical_history      TEXT,
+    allergies            TEXT,
+    current_medications  TEXT,
+
+    created_at           TIMESTAMPTZ DEFAULT NOW(),
+    updated_at           TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_family_members_patient ON family_members(patient_id);
+
+ALTER TABLE family_members ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Service role full access" ON family_members FOR ALL USING (true) WITH CHECK (true);
+
+CREATE TRIGGER trg_family_members_updated BEFORE UPDATE ON family_members
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+
 -- DONE! All tables created with indexes, triggers, and RLS policies.
 -- ═══════════════════════════════════════════════════════════════════════════
