@@ -115,7 +115,7 @@ CREATE TABLE doctors (
 
     -- Availability
     available_status      VARCHAR(50) DEFAULT 'offline'
-                            CHECK (available_status IN ('available', 'busy', 'offline', 'on_leave')),
+                            CHECK (available_status IN ('available', 'busy', 'offline', 'on_leave', 'suspended', 'inactive')),
     available_slots       JSONB DEFAULT '[]'::jsonb,
 
     -- Metrics

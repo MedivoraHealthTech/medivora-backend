@@ -484,7 +484,8 @@ class DatabaseManager:
                 {"available_status": status}
             ).eq("id", doctor_id).execute()
             return True
-        except Exception:
+        except Exception as e:
+            logger.error(f"update_doctor_status failed (id={doctor_id}, status={status}): {e}")
             return False
 
     async def login_doctor(self, phone: str, password: str) -> Optional[Dict]:

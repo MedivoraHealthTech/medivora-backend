@@ -64,6 +64,31 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ── Private Network Access (PNA) middleware ────────────────────────────
+# Chrome sends Access-Control-Request-Private-Network: true when a page on
+# localhost makes requests to a loopback address. Starlette's CORSMiddleware
+# does not handle this header and returns 400, which Chrome reports as a
+# CORS error. This middleware injects the required response header.
+
+@app.middleware("http")
+async def private_network_access_middleware(request: Request, call_next):
+    if (
+        request.method == "OPTIONS"
+        and request.headers.get("access-control-request-private-network") == "true"
+    ):
+        from fastapi.responses import Response as FResponse
+        response = FResponse(status_code=200)
+        response.headers["Access-Control-Allow-Private-Network"] = "true"
+        response.headers["Access-Control-Allow-Origin"] = request.headers.get("origin", "*")
+        response.headers["Access-Control-Allow-Credentials"] = "true"
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
+        response.headers["Access-Control-Allow-Headers"] = request.headers.get(
+            "access-control-request-headers", "*"
+        )
+        return response
+    response = await call_next(request)
+    return response
+
 # ── Routers ───────────────────────────────────────────────────────────
 
 app.include_router(health.router)
