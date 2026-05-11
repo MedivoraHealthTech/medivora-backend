@@ -148,7 +148,24 @@ class DatabaseManager:
             .range(offset, offset + limit - 1)
             .execute()
         )
-        return result.data
+        users = result.data or []
+        if not users:
+            return users
+        # Fetch session counts for all returned patients in one query
+        patient_ids = [u["id"] for u in users]
+        sessions_result = (
+            self.client.table("chat_sessions")
+            .select("patient_id")
+            .in_("patient_id", patient_ids)
+            .execute()
+        )
+        count_map: dict = {}
+        for s in sessions_result.data or []:
+            pid = s["patient_id"]
+            count_map[pid] = count_map.get(pid, 0) + 1
+        for u in users:
+            u["session_count"] = count_map.get(u["id"], 0)
+        return users
 
     # ── OTP ────────────────────────────────────────────────────────────
 
@@ -355,7 +372,7 @@ class DatabaseManager:
         """Return all doctors, enriched with first_name/last_name/email from profiles."""
         result = (
             self.client.table("doctors")
-            .select("*, profiles(first_name, last_name, email)")
+            .select("*, profiles(first_name, last_name, email, phone)")
             .execute()
         )
         doctors = []
@@ -364,6 +381,7 @@ class DatabaseManager:
             row["first_name"] = (profile.get("first_name") or "").strip()
             row["last_name"] = (profile.get("last_name") or "").strip()
             row["email"] = profile.get("email", "")
+            row["phone"] = profile.get("phone", "")
             # Flatten specialties JSONB array → first element as 'specialization'
             specs = row.get("specialties") or []
             row["specialization"] = specs[0] if specs else "General Physician"
@@ -431,7 +449,7 @@ class DatabaseManager:
     async def update_doctor_status(self, doctor_id: str, status: str) -> bool:
         try:
             self.client.table("doctors").update(
-                {"verification_status": status}
+                {"available_status": status}
             ).eq("id", doctor_id).execute()
             return True
         except Exception:
@@ -470,10 +488,12 @@ class DatabaseManager:
 
     async def login_admin(self, username: str, password: str) -> Optional[Dict]:
         import bcrypt
+        # Username is stored with a '+' prefix in the phone column
+        lookup = username if username.startswith("+") else "+" + username
         result = (
             self.client.table("profiles")
             .select("*")
-            .eq("phone", username)
+            .eq("phone", lookup)
             .eq("user_type", "admin")
             .limit(1)
             .execute()
