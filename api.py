@@ -1347,13 +1347,17 @@ async def admin_list_doctors(current_admin: Dict = Depends(require_admin)):
         raise HTTPException(status_code=500, detail="Error retrieving doctors")
 
 
+class _DoctorStatusBody(BaseModel):
+    status: str
+
 @app.patch("/admin/doctors/{doctor_id}/status")
 async def admin_update_doctor_status(
     doctor_id: str,
-    status: str = Form(...),
+    body: _DoctorStatusBody,
     current_admin: Dict = Depends(require_admin),
 ):
     """Update doctor account status: available | suspended | on_leave (admin only)."""
+    status = body.status
     allowed = {"available", "suspended", "on_leave", "inactive"}
     if status not in allowed:
         raise HTTPException(status_code=422, detail=f"Status must be one of: {allowed}")

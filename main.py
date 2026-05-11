@@ -65,26 +65,27 @@ app.add_middleware(
 )
 
 # ── Private Network Access (PNA) middleware ────────────────────────────
-# Chrome sends Access-Control-Request-Private-Network: true when a page on
-# localhost makes requests to a loopback address. Starlette's CORSMiddleware
-# does not handle this header and returns 400, which Chrome reports as a
-# CORS error. This middleware injects the required response header.
+# Chrome 94+ enforces Private Network Access (PNA): when a page on localhost
+# requests a loopback address, Chrome requires Access-Control-Allow-Private-Network
+# in preflight responses. Starlette's CORSMiddleware doesn't support this and
+# returns 400 when it sees Access-Control-Request-Private-Network: true.
+# This middleware handles both cases: explicit PNA preflights and regular
+# preflights where Chrome still expects the header.
 
 @app.middleware("http")
 async def private_network_access_middleware(request: Request, call_next):
-    if (
-        request.method == "OPTIONS"
-        and request.headers.get("access-control-request-private-network") == "true"
-    ):
+    if request.method == "OPTIONS":
+        origin = request.headers.get("origin", "")
         from fastapi.responses import Response as FResponse
         response = FResponse(status_code=200)
         response.headers["Access-Control-Allow-Private-Network"] = "true"
-        response.headers["Access-Control-Allow-Origin"] = request.headers.get("origin", "*")
+        response.headers["Access-Control-Allow-Origin"] = origin or "*"
         response.headers["Access-Control-Allow-Credentials"] = "true"
         response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
         response.headers["Access-Control-Allow-Headers"] = request.headers.get(
-            "access-control-request-headers", "*"
+            "access-control-request-headers", "authorization, content-type"
         )
+        response.headers["Access-Control-Max-Age"] = "600"
         return response
     response = await call_next(request)
     return response
