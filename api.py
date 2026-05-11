@@ -1371,6 +1371,21 @@ async def admin_update_doctor_status(
         raise HTTPException(status_code=500, detail="Error updating doctor status")
 
 
+@app.get("/admin/patients/{profile_id}/family-members")
+async def admin_get_patient_family_members(profile_id: str, current_admin: Dict = Depends(require_admin)):
+    """Return family members for a specific patient (admin only)."""
+    try:
+        db = DatabaseManager()
+        patient_id = await db._resolve_patient_id(profile_id)
+        if not patient_id:
+            return {"members": []}
+        members = await db.get_family_members(patient_id)
+        return {"members": members}
+    except Exception as e:
+        logger.error(f"Error fetching family members for patient {profile_id}: {e}")
+        raise HTTPException(status_code=500, detail="Error retrieving family members")
+
+
 @app.get("/admin/prescriptions")
 async def admin_list_prescriptions(current_admin: Dict = Depends(require_admin)):
     """List all prescriptions with patient and doctor details (admin only)."""

@@ -151,20 +151,52 @@ class DatabaseManager:
         users = result.data or []
         if not users:
             return users
-        # Fetch session counts for all returned patients in one query
-        patient_ids = [u["id"] for u in users]
-        sessions_result = (
-            self.client.table("chat_sessions")
-            .select("patient_id")
-            .in_("patient_id", patient_ids)
+        profile_ids = [u["id"] for u in users]
+
+        # Resolve profile_id → patients.id for all users (one query)
+        patients_result = (
+            self.client.table("patients")
+            .select("id, profile_id")
+            .in_("profile_id", profile_ids)
             .execute()
         )
-        count_map: dict = {}
-        for s in sessions_result.data or []:
-            pid = s["patient_id"]
-            count_map[pid] = count_map.get(pid, 0) + 1
+        profile_to_patient: dict = {}
+        patient_ids_list = []
+        for row in patients_result.data or []:
+            profile_to_patient[row["profile_id"]] = row["id"]
+            patient_ids_list.append(row["id"])
+
+        # Session counts keyed by patients.id (chat_sessions.patient_id references patients.id)
+        session_count_map: dict = {}
+        if patient_ids_list:
+            sessions_result = (
+                self.client.table("chat_sessions")
+                .select("patient_id")
+                .in_("patient_id", patient_ids_list)
+                .execute()
+            )
+            for s in sessions_result.data or []:
+                pid = s["patient_id"]
+                session_count_map[pid] = session_count_map.get(pid, 0) + 1
+
+        # Family member counts keyed by patients.id
+        family_count_map: dict = {}
+        if patient_ids_list:
+            family_result = (
+                self.client.table("family_members")
+                .select("patient_id")
+                .in_("patient_id", patient_ids_list)
+                .execute()
+            )
+            for f in family_result.data or []:
+                pid = f["patient_id"]
+                family_count_map[pid] = family_count_map.get(pid, 0) + 1
+
         for u in users:
-            u["session_count"] = count_map.get(u["id"], 0)
+            patient_id = profile_to_patient.get(u["id"])
+            u["patient_id"]         = patient_id
+            u["session_count"]      = session_count_map.get(patient_id, 0) if patient_id else 0
+            u["family_member_count"] = family_count_map.get(patient_id, 0) if patient_id else 0
         return users
 
     # ── OTP ────────────────────────────────────────────────────────────
