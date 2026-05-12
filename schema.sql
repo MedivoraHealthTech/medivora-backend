@@ -878,6 +878,7 @@ CREATE TABLE IF NOT EXISTS doctor_join_requests (
                         CHECK (status IN ('pending', 'approved', 'rejected')),
     reviewed_at       TIMESTAMPTZ,
     reviewed_by       UUID,
+    doctor_id         UUID        REFERENCES doctors(id),  -- set for self-registered doctors
     created_at        TIMESTAMPTZ DEFAULT NOW()
 );
 ALTER TABLE doctor_join_requests ENABLE ROW LEVEL SECURITY;

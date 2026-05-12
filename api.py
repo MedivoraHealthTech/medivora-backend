@@ -1404,6 +1404,56 @@ async def submit_doctor_join_request(body: DoctorJoinRequestBody):
     req = await db.create_doctor_join_request(data)
     return {"message": "Request submitted successfully", "id": req.get("id")}
 
+@app.post("/doctors/me/submit-approval")
+async def doctor_submit_approval(current_doctor: Dict = Depends(require_doctor)):
+    """Authenticated doctor submits their profile for admin approval.
+    Creates a doctor_join_requests row linked to their existing doctor record.
+    Note: JWT sub = profile_id (not doctors.id), so we look up by profile_id."""
+    db = DatabaseManager()
+    profile_id = current_doctor["sub"]
+
+    # Resolve the doctors table row from profile_id
+    doc_row = db.client.table("doctors").select("*").eq("profile_id", profile_id).limit(1).execute()
+    if not doc_row.data:
+        raise HTTPException(status_code=404, detail="Doctor record not found.")
+    doctor_row = doc_row.data[0]
+    doctor_id = doctor_row["id"]
+
+    # Also get profile info (name, phone, email)
+    prof_row = db.client.table("profiles").select("first_name, last_name, phone, email").eq("id", profile_id).limit(1).execute()
+    prof = prof_row.data[0] if prof_row.data else {}
+
+    # Block duplicate pending requests
+    existing = db.client.table("doctor_join_requests") \
+        .select("id", "status") \
+        .eq("doctor_id", doctor_id) \
+        .eq("status", "pending") \
+        .limit(1).execute()
+    if existing.data:
+        raise HTTPException(status_code=409, detail="You already have a pending approval request.")
+
+    specs_list = doctor_row.get("specialties") or []
+    specs_str  = ", ".join(specs_list) if specs_list else "general_medicine"
+
+    data = {
+        "doctor_id":        doctor_id,
+        "first_name":       prof.get("first_name") or "",
+        "last_name":        prof.get("last_name")  or "",
+        "phone":            prof.get("phone")      or "",
+        "email":            prof.get("email")      or "",
+        "specialties":      specs_str,
+        "experience_years": doctor_row.get("experience_years") or 0,
+        "medical_college":  doctor_row.get("medical_college")  or "",
+        "nmc_number":       doctor_row.get("nmc_number")        or "",
+        "clinic_name":      doctor_row.get("clinic_name")       or "",
+        "clinic_address":   doctor_row.get("clinic_address")    or "",
+        "consultation_fee": doctor_row.get("consultation_fee"),
+        "notes":            "",
+    }
+    req = await db.create_doctor_join_request(data)
+    logger.info(f"Doctor {doctor_id} submitted approval request {req.get('id')}")
+    return {"message": "Approval request submitted successfully", "id": req.get("id")}
+
 @app.get("/admin/doctor-requests")
 async def admin_list_doctor_requests(
     status: Optional[str] = None,
@@ -1419,7 +1469,9 @@ async def admin_approve_doctor_request(
     request_id: str,
     current_admin: Dict = Depends(require_admin),
 ):
-    """Approve a doctor join request — creates profile + doctors rows."""
+    """Approve a doctor join request.
+    - If request has doctor_id: activate the existing self-registered doctor.
+    - Otherwise: create a new profile + doctor account (old admin-invite flow)."""
     import uuid as _uuid, bcrypt as _bcrypt
     db = DatabaseManager()
     req = await db.get_doctor_join_request(request_id)
@@ -1428,6 +1480,18 @@ async def admin_approve_doctor_request(
     if req["status"] != "pending":
         raise HTTPException(status_code=409, detail=f"Request is already {req['status']}")
 
+    # ── Self-registered doctor (has doctor_id) ─────────────────────────────
+    if req.get("doctor_id"):
+        doctor_id = req["doctor_id"]
+        db.client.table("doctors") \
+            .update({"available_status": "available"}) \
+            .eq("id", doctor_id) \
+            .execute()
+        await db.update_doctor_join_request_status(request_id, "approved", current_admin["sub"])
+        logger.info(f"Admin {current_admin['sub']} approved self-registered doctor {doctor_id} via request {request_id}")
+        return {"message": "Doctor approved and activated", "doctor_id": doctor_id}
+
+    # ── Admin-invited doctor (no doctor_id) — create new account ──────────
     # Check phone not already registered
     existing_profile = db.client.table("profiles").select("id").eq("phone", req["phone"]).limit(1).execute()
     if existing_profile.data:
@@ -1472,7 +1536,7 @@ async def admin_approve_doctor_request(
     # Mark request as approved
     await db.update_doctor_join_request_status(request_id, "approved", current_admin["sub"])
 
-    logger.info(f"Admin {current_admin['sub']} approved doctor request {request_id} → doctor {doctor_id}")
+    logger.info(f"Admin {current_admin['sub']} approved doctor request {request_id} → new doctor {doctor_id}")
     return {"message": "Doctor approved and account created", "doctor_id": doctor_id, "temp_password": temp_pw}
 
 @app.post("/admin/doctor-requests/{request_id}/reject")
@@ -2103,7 +2167,7 @@ async def doctor_login_via_supabase(current_user: Dict = Depends(get_current_use
     try:
         db.client.table("doctors").insert({
             "profile_id":       profile_id,
-            "available_status": "offline",
+            "available_status": "inactive",
             "specialties":      [],
             "available_slots":  [],
         }).execute()
@@ -2215,7 +2279,7 @@ async def get_doctor_slots(doctor_id: str):
         doctor = None
 
     # Unavailable doctors have no slots
-    if doctor and doctor.get("available_status") in ("offline", "on_leave"):
+    if doctor and doctor.get("available_status") in ("offline", "on_leave", "inactive"):
         return {"doctor_id": doctor_id, "slots": {}}
 
     INTERVAL = timedelta(minutes=30)
@@ -2272,10 +2336,10 @@ async def get_doctor_slots(doctor_id: str):
 
 @app.get("/doctors")
 async def get_all_doctors(specialty: Optional[str] = None):
-    """Get all registered doctors, optionally filtered by specialty."""
+    """Get all registered doctors visible to patients, optionally filtered by specialty."""
     try:
         db = DatabaseManager()
-        doctors = await db.get_all_doctors()
+        doctors = await db.get_all_doctors(patient_facing=True)
         if specialty:
             spec_lower = specialty.lower().strip()
             filtered = [d for d in doctors if spec_lower in (d.get("specialization") or "").lower()]

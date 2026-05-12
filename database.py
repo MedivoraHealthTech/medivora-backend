@@ -402,10 +402,13 @@ class DatabaseManager:
 
     async def get_all_doctors(self, patient_facing: bool = False) -> List[Dict]:
         """Return all doctors, enriched with first_name/last_name/email from profiles.
-        patient_facing=True excludes suspended/inactive doctors."""
+        patient_facing=True shows available + inactive doctors (inactive = pending approval,
+        visible to patients but not bookable). Suspended doctors are always excluded from
+        patient-facing views."""
         query = self.client.table("doctors").select("*, profiles(first_name, last_name, email, phone)")
         if patient_facing:
-            query = query.eq("available_status", "available")
+            # Show available (bookable) and inactive (pending approval, visible but not bookable)
+            query = query.in_("available_status", ["available", "inactive"])
         result = query.execute()
         doctors = []
         for row in result.data or []:
@@ -419,6 +422,8 @@ class DatabaseManager:
             row["specialization"] = specs[0] if specs else "General Physician"
             # clinic_address doubles as city for the directory listing
             row["city"] = row.get("clinic_address") or ""
+            # Patients can only book available doctors
+            row["is_bookable"] = row.get("available_status") == "available"
             doctors.append(row)
         return doctors
 
