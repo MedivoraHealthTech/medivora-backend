@@ -400,13 +400,13 @@ class DatabaseManager:
 
     # ── DOCTORS ────────────────────────────────────────────────────────
 
-    async def get_all_doctors(self) -> List[Dict]:
-        """Return all doctors, enriched with first_name/last_name/email from profiles."""
-        result = (
-            self.client.table("doctors")
-            .select("*, profiles(first_name, last_name, email, phone)")
-            .execute()
-        )
+    async def get_all_doctors(self, patient_facing: bool = False) -> List[Dict]:
+        """Return all doctors, enriched with first_name/last_name/email from profiles.
+        patient_facing=True excludes suspended/inactive doctors."""
+        query = self.client.table("doctors").select("*, profiles(first_name, last_name, email, phone)")
+        if patient_facing:
+            query = query.eq("available_status", "available")
+        result = query.execute()
         doctors = []
         for row in result.data or []:
             profile = row.pop("profiles", None) or {}

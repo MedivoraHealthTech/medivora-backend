@@ -16,5 +16,5 @@ router = APIRouter(prefix="/doctors", tags=["doctors"])
 async def list_doctors(current_user=Depends(get_current_user)):
     """Return all active doctors for the patient-facing directory."""
     db = DatabaseManager()
-    doctors = await db.get_all_doctors()
+    doctors = await db.get_all_doctors(patient_facing=True)
     return {"doctors": doctors}
