@@ -1525,6 +1525,36 @@ class DatabaseManager:
 
         return saved_rx
 
+    # ─── Doctor Join Requests ──────────────────────────────────────────────────
+
+    async def create_doctor_join_request(self, data: Dict) -> Dict:
+        result = self.client.table("doctor_join_requests").insert(data).execute()
+        return result.data[0] if result.data else {}
+
+    async def get_doctor_join_requests(self, status: Optional[str] = None) -> List[Dict]:
+        query = self.client.table("doctor_join_requests").select("*").order("created_at", desc=True)
+        if status:
+            query = query.eq("status", status)
+        result = query.execute()
+        return result.data or []
+
+    async def get_doctor_join_request(self, request_id: str) -> Optional[Dict]:
+        result = self.client.table("doctor_join_requests").select("*").eq("id", request_id).limit(1).execute()
+        return result.data[0] if result.data else None
+
+    async def update_doctor_join_request_status(self, request_id: str, status: str, reviewed_by: str) -> bool:
+        from datetime import datetime, timezone
+        try:
+            self.client.table("doctor_join_requests").update({
+                "status": status,
+                "reviewed_at": datetime.now(timezone.utc).isoformat(),
+                "reviewed_by": reviewed_by,
+            }).eq("id", request_id).execute()
+            return True
+        except Exception as e:
+            logger.error(f"update_doctor_join_request_status failed: {e}")
+            return False
+
     # ─── Doctor Waitlist ───────────────────────────────────────────────────────
 
     async def add_to_doctor_waitlist(self, name: str, phone: str) -> Dict:

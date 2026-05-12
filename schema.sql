@@ -859,6 +859,30 @@ CREATE POLICY "Service role full access" ON login_attempts         FOR ALL USING
 CREATE POLICY "Service role full access" ON prescription_documents FOR ALL USING (true) WITH CHECK (true);
 CREATE POLICY "Service role full access" ON prescription_edit_log  FOR ALL USING (true) WITH CHECK (true);
 
+-- ─── Doctor Join Requests ────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS doctor_join_requests (
+    id                UUID        PRIMARY KEY DEFAULT uuid_generate_v4(),
+    first_name        TEXT        NOT NULL,
+    last_name         TEXT        NOT NULL DEFAULT '',
+    phone             TEXT        NOT NULL,
+    email             TEXT        NOT NULL DEFAULT '',
+    specialties       TEXT        NOT NULL DEFAULT 'general_medicine',
+    experience_years  INT         NOT NULL DEFAULT 0,
+    medical_college   TEXT        NOT NULL DEFAULT '',
+    nmc_number        TEXT        NOT NULL DEFAULT '',
+    clinic_name       TEXT        NOT NULL DEFAULT '',
+    clinic_address    TEXT        NOT NULL DEFAULT '',
+    consultation_fee  DECIMAL(10,2),
+    notes             TEXT        NOT NULL DEFAULT '',
+    status            TEXT        NOT NULL DEFAULT 'pending'
+                        CHECK (status IN ('pending', 'approved', 'rejected')),
+    reviewed_at       TIMESTAMPTZ,
+    reviewed_by       UUID,
+    created_at        TIMESTAMPTZ DEFAULT NOW()
+);
+ALTER TABLE doctor_join_requests ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Service role full access" ON doctor_join_requests FOR ALL USING (true) WITH CHECK (true);
+
 -- ─── Doctor Waitlist ──────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS doctor_waitlist (
     id         UUID        DEFAULT uuid_generate_v4() PRIMARY KEY,

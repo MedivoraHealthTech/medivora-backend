@@ -1375,6 +1375,123 @@ async def admin_update_doctor_status(
         raise HTTPException(status_code=500, detail="Error updating doctor status")
 
 
+
+# ── Doctor Join Requests ──────────────────────────────────────────────────────
+
+class DoctorJoinRequestBody(BaseModel):
+    first_name: str
+    last_name: str = ""
+    phone: str
+    email: str = ""
+    specialties: str = "general_medicine"
+    experience_years: int = 0
+    medical_college: str = ""
+    nmc_number: str = ""
+    clinic_name: str = ""
+    clinic_address: str = ""
+    consultation_fee: Optional[float] = None
+    notes: str = ""
+
+@app.post("/doctor-requests")
+async def submit_doctor_join_request(body: DoctorJoinRequestBody):
+    """Public endpoint — doctor submits a joining request for admin review."""
+    db = DatabaseManager()
+    # Prevent duplicate pending requests for the same phone
+    existing = db.client.table("doctor_join_requests").select("id", "status").eq("phone", body.phone).eq("status", "pending").limit(1).execute()
+    if existing.data:
+        raise HTTPException(status_code=409, detail="A pending request already exists for this phone number.")
+    data = body.model_dump()
+    req = await db.create_doctor_join_request(data)
+    return {"message": "Request submitted successfully", "id": req.get("id")}
+
+@app.get("/admin/doctor-requests")
+async def admin_list_doctor_requests(
+    status: Optional[str] = None,
+    current_admin: Dict = Depends(require_admin),
+):
+    """List doctor join requests, optionally filtered by status."""
+    db = DatabaseManager()
+    requests = await db.get_doctor_join_requests(status=status)
+    return {"requests": requests, "count": len(requests)}
+
+@app.post("/admin/doctor-requests/{request_id}/approve")
+async def admin_approve_doctor_request(
+    request_id: str,
+    current_admin: Dict = Depends(require_admin),
+):
+    """Approve a doctor join request — creates profile + doctors rows."""
+    import uuid as _uuid, bcrypt as _bcrypt
+    db = DatabaseManager()
+    req = await db.get_doctor_join_request(request_id)
+    if not req:
+        raise HTTPException(status_code=404, detail="Request not found")
+    if req["status"] != "pending":
+        raise HTTPException(status_code=409, detail=f"Request is already {req['status']}")
+
+    # Check phone not already registered
+    existing_profile = db.client.table("profiles").select("id").eq("phone", req["phone"]).limit(1).execute()
+    if existing_profile.data:
+        raise HTTPException(status_code=409, detail="A doctor with this phone number already exists.")
+
+    profile_id = str(_uuid.uuid4())
+    doctor_id  = str(_uuid.uuid4())
+    temp_pw    = _uuid.uuid4().hex[:12]  # temporary password — doctor must reset
+    pw_hash    = _bcrypt.hashpw(temp_pw.encode(), _bcrypt.gensalt()).decode()
+
+    # Create profile row
+    db.client.table("profiles").insert({
+        "id":            profile_id,
+        "user_type":     "doctor",
+        "role":          "doctor",
+        "first_name":    req["first_name"],
+        "last_name":     req["last_name"],
+        "phone":         req["phone"],
+        "email":         req["email"],
+        "password_hash": pw_hash,
+        "status":        "active",
+    }).execute()
+
+    # Create doctor row
+    specs = [s.strip() for s in req["specialties"].split(",") if s.strip()]
+    doctor_row = {
+        "id":               doctor_id,
+        "profile_id":       profile_id,
+        "specialties":      specs,
+        "experience_years": req["experience_years"],
+        "medical_college":  req["medical_college"],
+        "nmc_number":       req["nmc_number"] or None,
+        "clinic_name":      req["clinic_name"] or None,
+        "clinic_address":   req["clinic_address"] or None,
+        "available_status": "available",
+        "license_verified": False,
+    }
+    if req.get("consultation_fee") is not None:
+        doctor_row["consultation_fee"] = req["consultation_fee"]
+    db.client.table("doctors").insert(doctor_row).execute()
+
+    # Mark request as approved
+    await db.update_doctor_join_request_status(request_id, "approved", current_admin["sub"])
+
+    logger.info(f"Admin {current_admin['sub']} approved doctor request {request_id} → doctor {doctor_id}")
+    return {"message": "Doctor approved and account created", "doctor_id": doctor_id, "temp_password": temp_pw}
+
+@app.post("/admin/doctor-requests/{request_id}/reject")
+async def admin_reject_doctor_request(
+    request_id: str,
+    current_admin: Dict = Depends(require_admin),
+):
+    """Reject a doctor join request."""
+    db = DatabaseManager()
+    req = await db.get_doctor_join_request(request_id)
+    if not req:
+        raise HTTPException(status_code=404, detail="Request not found")
+    if req["status"] != "pending":
+        raise HTTPException(status_code=409, detail=f"Request is already {req['status']}")
+    await db.update_doctor_join_request_status(request_id, "rejected", current_admin["sub"])
+    logger.info(f"Admin {current_admin['sub']} rejected doctor request {request_id}")
+    return {"message": "Request rejected"}
+
+
 @app.get("/admin/patients/{profile_id}/family-members")
 async def admin_get_patient_family_members(profile_id: str, current_admin: Dict = Depends(require_admin)):
     """Return family members for a specific patient (admin only)."""
