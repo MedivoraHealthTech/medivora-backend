@@ -1307,6 +1307,206 @@ async def admin_login(request: Request, body: AdminLoginRequest):
         raise HTTPException(status_code=500, detail="Login failed")
 
 
+@app.get("/admin/analytics")
+async def get_admin_analytics(current_admin: Dict = Depends(require_admin)):
+    """Rich analytics data for the admin dashboard."""
+    from collections import Counter, defaultdict
+    import calendar
+
+    db = DatabaseManager()
+
+    # ── Patients ─────────────────────────────────────────────────────────
+    patients_res = db.client.table("patients").select(
+        "age, gender, blood_group, chronic_conditions, medical_history, "
+        "allergies, is_smoker, is_alcohol_user, is_pregnant, is_nursing, created_at"
+    ).execute()
+    patients = patients_res.data or []
+
+    # Gender
+    gender_raw = Counter(
+        (r.get("gender") or "unknown").lower() for r in patients
+    )
+    gender_dist = [
+        {"label": k.capitalize() if k != "unknown" else "Not specified", "value": v}
+        for k, v in gender_raw.items()
+    ]
+
+    # Age groups
+    age_buckets = {"0-17": 0, "18-30": 0, "31-45": 0, "46-60": 0, "60+": 0, "Unknown": 0}
+    for r in patients:
+        age = r.get("age")
+        if not age:
+            age_buckets["Unknown"] += 1
+        elif age <= 17:
+            age_buckets["0-17"] += 1
+        elif age <= 30:
+            age_buckets["18-30"] += 1
+        elif age <= 45:
+            age_buckets["31-45"] += 1
+        elif age <= 60:
+            age_buckets["46-60"] += 1
+        else:
+            age_buckets["60+"] += 1
+    age_dist = [{"label": k, "value": v} for k, v in age_buckets.items() if v > 0]
+
+    # Blood groups
+    bg_raw = Counter(r.get("blood_group") or "Unknown" for r in patients)
+    blood_group_dist = [{"label": k, "value": v} for k, v in bg_raw.most_common()]
+
+    # Chronic conditions
+    all_conditions = []
+    for r in patients:
+        conds = r.get("chronic_conditions") or []
+        if isinstance(conds, list):
+            all_conditions.extend([c for c in conds if c])
+        elif isinstance(conds, str) and conds:
+            all_conditions.append(conds)
+        # Also check medical_history text field
+        mh = r.get("medical_history") or []
+        if isinstance(mh, list):
+            all_conditions.extend([c for c in mh if c])
+        elif isinstance(mh, str) and mh:
+            all_conditions.append(mh)
+    conditions_dist = [{"label": k, "value": v} for k, v in Counter(all_conditions).most_common(8)]
+
+    # Lifestyle
+    total_p = len(patients)
+    lifestyle = [
+        {"label": "Smokers",         "value": sum(1 for r in patients if r.get("is_smoker"))},
+        {"label": "Alcohol users",   "value": sum(1 for r in patients if r.get("is_alcohol_user"))},
+        {"label": "Pregnant",        "value": sum(1 for r in patients if r.get("is_pregnant"))},
+        {"label": "Nursing",         "value": sum(1 for r in patients if r.get("is_nursing"))},
+    ]
+
+    # Monthly patient sign-ups (last 6 months)
+    monthly_patients: dict = defaultdict(int)
+    for r in patients:
+        ts = r.get("created_at") or ""
+        if ts:
+            month_key = ts[:7]  # YYYY-MM
+            monthly_patients[month_key] += 1
+
+    # ── Consultations ────────────────────────────────────────────────────
+    consults_res = db.client.table("consultations").select(
+        "doctor_id, status, consultation_type, created_at"
+    ).execute()
+    consults = consults_res.data or []
+
+    consult_status_dist = [
+        {"label": k.capitalize(), "value": v}
+        for k, v in Counter(r.get("status") for r in consults).most_common()
+    ]
+    consult_type_dist = [
+        {"label": ("Video" if k == "video" else "In-Person") if k else "Unknown", "value": v}
+        for k, v in Counter(r.get("consultation_type") for r in consults).most_common()
+    ]
+
+    # Consultations by doctor — enrich with name
+    by_doctor_id = Counter(r.get("doctor_id") for r in consults if r.get("doctor_id"))
+    doctor_ids = [did for did, _ in by_doctor_id.most_common(8)]
+    doctor_names: dict = {}
+    if doctor_ids:
+        docs_res = db.client.table("doctors").select("id, profile_id").in_("id", doctor_ids).execute()
+        prof_ids = [d["profile_id"] for d in (docs_res.data or []) if d.get("profile_id")]
+        profs_res = db.client.table("profiles").select("id, first_name, last_name").in_("id", prof_ids).execute()
+        prof_map = {p["id"]: p for p in (profs_res.data or [])}
+        for d in (docs_res.data or []):
+            prof = prof_map.get(d.get("profile_id"), {})
+            name = f"Dr. {(prof.get('first_name') or '')} {(prof.get('last_name') or '')}".strip()
+            doctor_names[d["id"]] = name if name != "Dr." else f"Doctor {d['id'][:6]}"
+    consults_by_doctor = [
+        {"label": doctor_names.get(did, f"Doctor {did[:6]}"), "value": cnt}
+        for did, cnt in by_doctor_id.most_common(8)
+    ]
+
+    # Monthly consultations (last 6 months)
+    monthly_consults: dict = defaultdict(int)
+    for r in consults:
+        ts = r.get("created_at") or ""
+        if ts:
+            month_key = ts[:7]
+            monthly_consults[month_key] += 1
+
+    # Build unified monthly growth (last 6 months)
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
+    month_labels = []
+    for i in range(5, -1, -1):
+        year  = now.year  if now.month - i > 0 else now.year - 1
+        month = (now.month - i - 1) % 12 + 1
+        key   = f"{year}-{month:02d}"
+        month_labels.append((key, calendar.month_abbr[month]))
+    monthly_growth = [
+        {
+            "month":         label,
+            "patients":      monthly_patients.get(key, 0),
+            "consultations": monthly_consults.get(key, 0),
+        }
+        for key, label in month_labels
+    ]
+
+    # ── Doctors ──────────────────────────────────────────────────────────
+    doctors_res = db.client.table("doctors").select("available_status").execute()
+    doctors = doctors_res.data or []
+    doctor_status_dist = [
+        {"label": k.capitalize().replace("_", " "), "value": v}
+        for k, v in Counter(r.get("available_status") for r in doctors).most_common()
+    ]
+
+    # Doctor join requests pipeline
+    djr_res = db.client.table("doctor_join_requests").select("status").execute()
+    djr_status_dist = [
+        {"label": k.capitalize(), "value": v}
+        for k, v in Counter(r.get("status") for r in (djr_res.data or [])).most_common()
+    ]
+
+    # ── Chat sessions ────────────────────────────────────────────────────
+    sessions_res = db.client.table("chat_sessions").select("status, created_at").execute()
+    sessions = sessions_res.data or []
+    session_status_dist = [
+        {"label": k.capitalize().replace("_", " "), "value": v}
+        for k, v in Counter(r.get("status") for r in sessions).most_common()
+    ]
+
+    # ── Prescriptions ────────────────────────────────────────────────────
+    px_res = db.client.table("prescriptions").select("status").execute()
+    px_status_dist = [
+        {"label": k.capitalize() if k else "Unknown", "value": v}
+        for k, v in Counter(r.get("status") for r in (px_res.data or [])).most_common()
+    ]
+
+    return {
+        "patients": {
+            "total":         total_p,
+            "gender":        gender_dist,
+            "age_groups":    age_dist,
+            "blood_groups":  blood_group_dist,
+            "conditions":    conditions_dist,
+            "lifestyle":     lifestyle,
+        },
+        "consultations": {
+            "total":     len(consults),
+            "by_status": consult_status_dist,
+            "by_type":   consult_type_dist,
+            "by_doctor": consults_by_doctor,
+        },
+        "doctors": {
+            "total":        len(doctors),
+            "by_status":    doctor_status_dist,
+            "join_requests": djr_status_dist,
+        },
+        "sessions": {
+            "total":     len(sessions),
+            "by_status": session_status_dist,
+        },
+        "prescriptions": {
+            "total":     len(px_res.data or []),
+            "by_status": px_status_dist,
+        },
+        "monthly_growth": monthly_growth,
+    }
+
+
 @app.get("/admin/stats")
 async def get_admin_stats(current_admin: Dict = Depends(require_admin)):
     """System-wide statistics (admin only)."""
