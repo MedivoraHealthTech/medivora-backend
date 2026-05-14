@@ -123,6 +123,9 @@ CREATE TABLE doctors (
     rating_count          INT DEFAULT 0,
     cases_handled         INT DEFAULT 0,
 
+    -- Display ordering (seeded/featured doctors get low values; defaults to 999)
+    sort_order            INT NOT NULL DEFAULT 999,
+
     created_at            TIMESTAMPTZ DEFAULT NOW(),
     updated_at            TIMESTAMPTZ DEFAULT NOW()
 );
@@ -130,6 +133,7 @@ CREATE TABLE doctors (
 CREATE INDEX idx_doctors_profile_id ON doctors(profile_id);
 CREATE INDEX idx_doctors_nmc ON doctors(nmc_number);
 CREATE INDEX idx_doctors_status ON doctors(available_status);
+CREATE INDEX idx_doctors_sort_order ON doctors(sort_order);
 
 -- ─────────────────────────────────────────────────────────────────────────
 -- 4. MEDICAL_RECORDS — Patient medical history entries

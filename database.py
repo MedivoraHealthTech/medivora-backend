@@ -409,7 +409,7 @@ class DatabaseManager:
         if patient_facing:
             # Show available (bookable) and inactive (pending approval, visible but not bookable)
             query = query.in_("available_status", ["available", "inactive"])
-        result = query.execute()
+        result = query.order("sort_order", desc=False).execute()
         doctors = []
         for row in result.data or []:
             profile = row.pop("profiles", None) or {}
