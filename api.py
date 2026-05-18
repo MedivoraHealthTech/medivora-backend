@@ -3862,6 +3862,13 @@ Generate a complete prescription as a valid JSON object with this exact structur
       "before_food": false
     }}
   ],
+  "suggested_tests": [
+    {{
+      "test_name": "<e.g. Complete Blood Count>",
+      "reason": "<brief clinical reason>",
+      "priority": "<routine|urgent>"
+    }}
+  ],
   "general_instructions": ["<instruction 1>", "<instruction 2>"],
   "dietary_advice": ["<advice 1>", "<advice 2>"],
   "warning_signs": ["<warning 1>", "<warning 2>"],
@@ -3872,6 +3879,7 @@ Rules:
 - Only prescribe drugs that are safe for the patient (respect allergies and conditions).
 - Prefer generic names; include brand name for clarity.
 - No Schedule X / narcotic drugs.
+- Include suggested_tests only when clinically indicated; leave as empty array [] if none needed.
 - Return ONLY the raw JSON object — no markdown, no extra text.
 """
 
@@ -3958,6 +3966,7 @@ async def submit_consultation_prescription(
     }
 
     medicines = payload.get("medicines", [])
+    lab_tests = payload.get("lab_tests", [])
     items = []
     for med in medicines:
         items.append({
@@ -3968,6 +3977,21 @@ async def submit_consultation_prescription(
             "duration":       med.get("duration", ""),
             "instructions":   med.get("instructions", ""),
             "before_food":    med.get("before_food", False),
+            "item_type":      "medicine",
+            "contraindications": [],
+            "side_effects":   [],
+            "is_blacklisted": False,
+        })
+    for test in lab_tests:
+        items.append({
+            "medicine_name":  test.get("test_name", ""),
+            "generic_name":   test.get("reason", ""),
+            "dosage":         test.get("priority", "routine"),
+            "frequency":      "",
+            "duration":       "",
+            "instructions":   test.get("reason", ""),
+            "before_food":    False,
+            "item_type":      "lab_test",
             "contraindications": [],
             "side_effects":   [],
             "is_blacklisted": False,
