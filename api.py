@@ -1475,39 +1475,56 @@ async def get_admin_analytics(current_admin: Dict = Depends(require_admin)):
         for k, v in Counter(r.get("status") for r in (px_res.data or [])).most_common()
     ]
 
-    # ── Revenue ──────────────────────────────────────────────────────────
-    payments_res = db.client.table("payments") \
-        .select("amount, status, doctor_id") \
-        .eq("status", "completed") \
+    # ── Revenue — bookings × consultation_fee ────────────────────────────
+    # Fetch all doctors with fee info
+    all_docs_res = db.client.table("doctors") \
+        .select("id, profile_id, consultation_fee") \
         .execute()
-    payments = payments_res.data or []
-    total_revenue = sum(float(p.get("amount") or 0) for p in payments)
+    all_docs = all_docs_res.data or []
+    doc_fee_map = {d["id"]: float(d.get("consultation_fee") or 0) for d in all_docs}
+    doc_profile_map = {d["id"]: d.get("profile_id") for d in all_docs}
 
-    # Doctor-wise revenue — join with doctor names
-    doctor_rev: dict = defaultdict(float)
-    for p in payments:
-        did = p.get("doctor_id")
-        if did:
-            doctor_rev[did] += float(p.get("amount") or 0)
+    # Count non-cancelled consultations per doctor (reuse consults fetched above)
+    booking_count: dict = defaultdict(int)
+    for c in consults:
+        if c.get("status") not in ("cancelled", "no_show") and c.get("doctor_id"):
+            booking_count[c["doctor_id"]] += 1
 
-    # Resolve doctor names
-    doctor_rev_list = []
-    if doctor_rev:
-        doc_ids = list(doctor_rev.keys())
-        doc_profiles_res = db.client.table("doctors") \
-            .select("id, profile_id") \
-            .in_("id", doc_ids) \
-            .execute()
-        profile_ids = [d["profile_id"] for d in (doc_profiles_res.data or []) if d.get("profile_id")]
-        profiles_res = db.client.table("profiles") \
-            .select("id, first_name, last_name") \
-            .in_("id", profile_ids) \
-            .execute()
-        profile_map = {p["id"]: f"{p['first_name']} {p['last_name']}".strip() for p in (profiles_res.data or [])}
-        doc_to_profile = {d["id"]: d["profile_id"] for d in (doc_profiles_res.data or [])}
-        for did, rev in sorted(doctor_rev.items(), key=lambda x: -x[1]):
-            name = profile_map.get(doc_to_profile.get(did), "Unknown Doctor")
-            doctor_rev_list.append({"label": name, "value": round(rev, 2)})
+    # Resolve doctor names for all doctors with bookings
+    doc_names: dict = {}
+    booked_doc_ids = list(booking_count.keys())
+    if booked_doc_ids:
+        prof_ids = [doc_profile_map[did] for did in booked_doc_ids if doc_profile_map.get(did)]
+        if prof_ids:
+            profs_res = db.client.table("profiles") \
+                .select("id, first_name, last_name") \
+                .in_("id", prof_ids) \
+                .execute()
+            prof_name_map = {
+                p["id"]: f"Dr. {p.get('first_name','')} {p.get('last_name','')}".strip()
+                for p in (profs_res.data or [])
+            }
+            for did in booked_doc_ids:
+                pid = doc_profile_map.get(did)
+                doc_names[did] = prof_name_map.get(pid, f"Doctor {did[:6]}")
+
+    # Calculate revenue per doctor
+    doctor_rev: dict = {
+        did: cnt * doc_fee_map.get(did, 0)
+        for did, cnt in booking_count.items()
+    }
+    total_revenue = sum(doctor_rev.values())
+
+    doctor_rev_list = [
+        {
+            "label": doc_names.get(did, f"Doctor {did[:6]}"),
+            "value": round(rev, 2),
+            "bookings": booking_count[did],
+            "fee": doc_fee_map.get(did, 0),
+        }
+        for did, rev in sorted(doctor_rev.items(), key=lambda x: -x[1])
+        if rev > 0
+    ]
 
     return {
         "patients": {
