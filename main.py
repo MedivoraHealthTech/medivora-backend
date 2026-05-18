@@ -16,7 +16,7 @@ from fastapi.responses import JSONResponse
 from slowapi.errors import RateLimitExceeded
 
 from config import settings
-from routers import auth, patients, health, consultations, doctors, faqs
+from routers import auth, patients, health, consultations, doctors, faqs, portals, orders
 from auth.dependencies import get_current_user
 from db import get_db
 
@@ -98,6 +98,8 @@ app.include_router(patients.router)
 app.include_router(consultations.router)
 app.include_router(doctors.router)
 app.include_router(faqs.router)
+app.include_router(portals.router)
+app.include_router(orders.router)
 
 # ── Rate-limit handler (covers legacy routes that use @limiter.limit) ─────────
 # Without this, RateLimitExceeded escapes past CORSMiddleware → 500 without
