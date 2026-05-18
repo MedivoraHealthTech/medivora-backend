@@ -389,6 +389,9 @@ CREATE TABLE prescription_items (
 
     before_food       BOOLEAN,
 
+    item_type         VARCHAR(20) DEFAULT 'medicine'
+                        CHECK (item_type IN ('medicine', 'lab_test')),
+
     contraindications JSONB DEFAULT '[]'::jsonb,
     side_effects      JSONB DEFAULT '[]'::jsonb,
     is_blacklisted    BOOLEAN DEFAULT FALSE,
