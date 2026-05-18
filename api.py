@@ -1475,6 +1475,40 @@ async def get_admin_analytics(current_admin: Dict = Depends(require_admin)):
         for k, v in Counter(r.get("status") for r in (px_res.data or [])).most_common()
     ]
 
+    # ── Revenue ──────────────────────────────────────────────────────────
+    payments_res = db.client.table("payments") \
+        .select("amount, status, doctor_id") \
+        .eq("status", "completed") \
+        .execute()
+    payments = payments_res.data or []
+    total_revenue = sum(float(p.get("amount") or 0) for p in payments)
+
+    # Doctor-wise revenue — join with doctor names
+    doctor_rev: dict = defaultdict(float)
+    for p in payments:
+        did = p.get("doctor_id")
+        if did:
+            doctor_rev[did] += float(p.get("amount") or 0)
+
+    # Resolve doctor names
+    doctor_rev_list = []
+    if doctor_rev:
+        doc_ids = list(doctor_rev.keys())
+        doc_profiles_res = db.client.table("doctors") \
+            .select("id, profile_id") \
+            .in_("id", doc_ids) \
+            .execute()
+        profile_ids = [d["profile_id"] for d in (doc_profiles_res.data or []) if d.get("profile_id")]
+        profiles_res = db.client.table("profiles") \
+            .select("id, first_name, last_name") \
+            .in_("id", profile_ids) \
+            .execute()
+        profile_map = {p["id"]: f"{p['first_name']} {p['last_name']}".strip() for p in (profiles_res.data or [])}
+        doc_to_profile = {d["id"]: d["profile_id"] for d in (doc_profiles_res.data or [])}
+        for did, rev in sorted(doctor_rev.items(), key=lambda x: -x[1]):
+            name = profile_map.get(doc_to_profile.get(did), "Unknown Doctor")
+            doctor_rev_list.append({"label": name, "value": round(rev, 2)})
+
     return {
         "patients": {
             "total":         total_p,
@@ -1504,6 +1538,10 @@ async def get_admin_analytics(current_admin: Dict = Depends(require_admin)):
             "by_status": px_status_dist,
         },
         "monthly_growth": monthly_growth,
+        "revenue": {
+            "total":      round(total_revenue, 2),
+            "by_doctor":  doctor_rev_list,
+        },
     }
 
 
