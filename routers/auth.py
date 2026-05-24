@@ -156,21 +156,29 @@ async def send_otp(req: SendOTPRequest):
             "note": "Mock mode — OTP returned in response for development",
         }
 
-    # Production — send via Twilio
-    if not settings.TWILIO_ACCOUNT_SID or not settings.TWILIO_AUTH_TOKEN or not settings.TWILIO_FROM_NUMBER:
+    # Production — send via MSG91
+    if not settings.MSG91_AUTH_KEY or not settings.MSG91_OTP_TEMPLATE_ID:
         raise HTTPException(
             status_code=500,
-            detail="SMS service not configured. Set TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, and TWILIO_FROM_NUMBER.",
+            detail="SMS service not configured. Set MSG91_AUTH_KEY and MSG91_OTP_TEMPLATE_ID.",
         )
 
     try:
-        from twilio.rest import Client as TwilioClient
-        client = TwilioClient(settings.TWILIO_ACCOUNT_SID, settings.TWILIO_AUTH_TOKEN)
-        client.messages.create(
-            body=f"Your Medivora OTP is: {otp}. Valid for {settings.OTP_TTL_MINUTES} minute. Do not share this code.",
-            from_=settings.TWILIO_FROM_NUMBER,
-            to=req.phone,
+        import httpx
+        payload = {
+            "flow_id": settings.MSG91_OTP_TEMPLATE_ID,
+            "sender": settings.MSG91_SENDER_ID,
+            "mobiles": req.phone,
+            "OTP": otp,
+        }
+        resp = httpx.post(
+            "https://control.msg91.com/api/v5/flow/",
+            json=payload,
+            headers={"authkey": settings.MSG91_AUTH_KEY, "Content-Type": "application/json"},
+            timeout=10,
         )
+        if resp.status_code != 200:
+            raise Exception(f"MSG91 returned {resp.status_code}: {resp.text}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to send OTP via SMS: {str(e)}")
 

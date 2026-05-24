@@ -35,10 +35,23 @@ from auth import (
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.genai import types as genai_types
-from medivora_agent import root_agent
+from medivora_agent import root_agent, voice_agent
 from medivora_agent.tools import set_current_user_id, set_current_user
 from pdf_generator import generate_prescription_pdf, compute_signature_hash
 from drug_blacklist import seed_default_blacklist
+
+# Memory-driven healthcare modules (Phase 1–5)
+from services.memory import MemoryService
+from services.emotional import EmotionalContextBuilder
+from services.triage import TriageEngine
+from services.safety import SafetyValidator, log_safety_events
+from services.context_builder import ContextBuilder
+from services.vision import get_vision_service
+
+_triage_engine    = TriageEngine()
+_emotional_builder = EmotionalContextBuilder()
+_safety_validator  = SafetyValidator()
+_context_builder   = ContextBuilder()
 
 settings = Settings()
 
@@ -110,6 +123,16 @@ adk_runner = Runner(
     app_name=APP_NAME,
     session_service=adk_session_service,
 )
+
+# Separate session service + runner for voice — uses a lightweight agent
+# with thinking disabled to keep latency low.
+_voice_session_service = InMemorySessionService()
+_voice_runner = Runner(
+    agent=voice_agent,
+    app_name=APP_NAME + "_voice",
+    session_service=_voice_session_service,
+)
+_voice_active_sessions: set = set()
 
 # Track active session IDs for the /health and /sessions endpoints
 _active_sessions: set = set()
@@ -446,6 +469,7 @@ def get_message_count(session_id: str) -> int:
 @limiter.limit("30/minute")
 async def chat_endpoint(
     request: Request,
+    background_tasks: BackgroundTasks,
     message: str = Form(...),
     session_id: Optional[str] = Form(None),
     audio: Optional[UploadFile] = File(None),
@@ -498,15 +522,88 @@ async def chat_endpoint(
             is_authenticated = current_user is not None,
         )
 
-        # Detect emotional context
-        emotional_context = detect_emotional_context(chat_request.message)
-        adapted_message = chat_request.message
-        if emotional_context == "high_emotional":
-            adapted_message += "\n\n[SYSTEM NOTE: User seems emotionally vulnerable. Lead with 2 sentences of pure validation before any medical information. Be extra gentle.]"
-        elif emotional_context == "sensitive_topic":
-            adapted_message += "\n\n[SYSTEM NOTE: Sensitive topic. Apply double softness, halve info density. Acknowledge emotional weight first.]"
+        # ── Phase 3: Triage pre-assessment (deterministic, before Gemini) ──
+        db_for_memory = DatabaseManager() if user_id else None
+        memory_svc    = MemoryService(db_for_memory) if db_for_memory else None
+
+        # Fetch patient memory (authenticated users only)
+        patient_id      = None
+        patient_context = {"facts": {}, "recent_summaries": []}
+        if user_id and memory_svc:
+            patient_id = await memory_svc.get_patient_id(user_id)
+            if patient_id:
+                patient_context = await memory_svc.get_patient_context(
+                    patient_id, query_text=chat_request.message
+                )
+
+        triage_result = _triage_engine.score(chat_request.message, patient_context)
+
+        # Hard emergency: skip Gemini entirely — return instant pre-built response
+        if triage_result.is_hard_emergency:
+            logger.warning(f"HARD EMERGENCY detected: session={current_session_id}, score={triage_result.risk_score}")
+            emergency_resp = triage_result.emergency_response
+            if user_id and db_for_memory:
+                await db_for_memory.save_chat_message(current_session_id, user_id, "ai", emergency_resp)
+            return ChatResponse(
+                response=emergency_resp,
+                status="emergency",
+                session_id=current_session_id,
+                session_state="active",
+                additional_data={
+                    "adk_powered": False,
+                    "is_authenticated": current_user is not None,
+                    "is_medical_report": False,
+                    "is_book_appointment": False,
+                    "triage": triage_result.to_dict(),
+                },
+            )
+
+        # ── Phase 2: Emotional context ────────────────────────────────────
+        emotional_ctx = _emotional_builder.build(
+            current_message=chat_request.message,
+            memory_facts=patient_context.get("facts", {}),
+            is_first_message=is_new,
+        )
+
+        # ── Phase 1: Memory context injection (first message of session) ──
+        memory_note  = ""
+        # Prefer name from patient_memory facts over JWT (JWT often has no name)
+        _name_facts  = patient_context.get("facts", {}).get("preference", [])
+        patient_name = next((f["value"] for f in _name_facts if f["key"] == "name"), "")
+        if not patient_name:
+            patient_name = (current_user or {}).get("name", "") if user_id else ""
+        if is_new and patient_id and memory_svc:
+            memory_note = memory_svc.format_context_for_prompt(patient_context)
+
+        # ── Phase 6: Build enriched prompt ────────────────────────────────
+        # Triage note is NOT injected for URGENT/MODERATE — Gemini assesses
+        # those naturally. Hard emergencies are already bypassed above.
+        # Only inject for specialty routing hint (memory context only).
+        if is_new and memory_note:
+            adapted_message = _context_builder.build_first_message(
+                message=chat_request.message,
+                memory_note=memory_note,
+                emotional_note=emotional_ctx["system_note"],
+                triage_note="",
+                patient_name=patient_name if memory_note else None,
+            )
+        else:
+            adapted_message = _context_builder.build(
+                message=chat_request.message,
+                emotional_note=emotional_ctx["system_note"],
+                triage_note="",
+            )
 
         msg_count = get_message_count(current_session_id)
+
+        # ── Vision Layer: inject pending image context if present ──────────
+        # A previous /chat/upload-image call may have stored a [IMAGE CONTEXT]
+        # block for this session.  Consume it exactly once here so the AI
+        # sees the visual findings on the patient's very next message.
+        _image_ctx = _pending_image_contexts.pop(current_session_id, None)
+        if _image_ctx:
+            adapted_message = f"{_image_ctx}\n\n{adapted_message}"
+            logger.info(f"Image context injected into chat turn: session={current_session_id}")
 
         # Build ADK user message
         content = genai_types.Content(
@@ -536,6 +633,16 @@ async def chat_endpoint(
 
         final_response = soften_response(final_response)
 
+        # ── Phase 5: Safety validation ─────────────────────────────────────
+        raw_response   = final_response
+        safety_result  = _safety_validator.validate(
+            response=final_response,
+            patient_context=patient_context,
+            session_id=current_session_id,
+            patient_id=patient_id,
+        )
+        final_response = safety_result.response
+
         if msg_count % 5 == 0:
             final_response += "\n\n_Just a reminder — everything you share here is completely private and stays between us._ 💙"
 
@@ -552,10 +659,42 @@ async def chat_endpoint(
                 await _maybe_update_session_title(db, current_session_id, message, final_response)
 
             # ── Save AI recommendation only (skip verbatim user messages) ───────
-            # We store only the AI's last response per exchange; this captures
-            # diagnosis notes, treatment advice, and prescriptions without
-            # recording the full back-and-forth conversation text.
             await db.save_chat_message(current_session_id, user_id, "ai", final_response)
+
+            # ── Phase 1 & 5 background tasks ──────────────────────────────────
+            # Safety event logging
+            if safety_result.events and patient_id:
+                background_tasks.add_task(
+                    log_safety_events, db, safety_result,
+                    current_session_id, patient_id, raw_response,
+                )
+
+            # Memory: extract facts + save summary when triage report is complete
+            if memory_svc and patient_id:
+                # Extract structured facts from every exchange (lightweight)
+                background_tasks.add_task(
+                    memory_svc.extract_and_store_facts,
+                    patient_id,
+                    current_session_id,
+                    f"Patient: {message}\n\nAI: {final_response}",
+                )
+                # Session summary only when full triage report is shown
+                is_medical_report_turn = (
+                    "📋" in final_response and
+                    "assessment" in final_response.lower()
+                )
+                if is_medical_report_turn:
+                    outcome = "emergency" if safety_result.has_emergency else (
+                        "consultation_booked" if "book an appointment" in final_response.lower() else
+                        "prescription_pending"
+                    )
+                    background_tasks.add_task(
+                        memory_svc.save_session_summary,
+                        patient_id,
+                        current_session_id,
+                        _session_summary or final_response,
+                        outcome,
+                    )
 
             # Touch session updated_at
             await db.touch_chat_session(current_session_id)
@@ -650,6 +789,648 @@ async def chat_endpoint(
     except Exception as e:
         logger.error(f"Internal server error in chat_endpoint: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error occurred")
+
+# ── Image Vision Layer ──────────────────────────────────────────────────────
+#
+# In-process dict keyed by session_id storing the [IMAGE CONTEXT] prompt note
+# for the *next* chat turn.  Entries are consumed (pop'd) exactly once so the
+# context is injected into the very first follow-up message and then discarded.
+#
+# This avoids any DB round-trip on the hot chat path while guaranteeing the
+# image context is always available when the patient sends their next message.
+_pending_image_contexts: Dict[str, str] = {}
+
+_ALLOWED_IMAGE_MIMETYPES = {
+    "image/jpeg", "image/jpg", "image/png",
+    "image/webp", "image/gif", "image/heic", "image/heif",
+}
+_MAX_IMAGE_BYTES = 10 * 1024 * 1024  # 10 MB
+
+
+class ImageAnalysisResponse(BaseModel):
+    image_type:         str
+    description:        str
+    medical_context:    str
+    suggested_questions: List[str]
+    urgency_flag:       str
+    session_id:         str
+
+
+@app.post("/chat/upload-image", response_model=ImageAnalysisResponse)
+@limiter.limit("10/minute")
+async def upload_image_endpoint(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    image: UploadFile = File(...),
+    session_id: Optional[str] = Form(None),
+    current_user: Optional[Dict] = Depends(get_current_user_optional),
+):
+    """
+    Analyse a patient-uploaded image with Gemini 2.5-flash vision.
+
+    - Accepts multipart/form-data with an 'image' file field.
+    - Returns structured findings (image_type, description, medical_context,
+      suggested_questions, urgency_flag).
+    - Stores a [IMAGE CONTEXT] note keyed by session_id so the very next
+      /chat turn automatically receives it as part of the prompt.
+    - For authenticated users, persists a lightweight fact to patient_memory
+      and a full record to chat_image_analyses.
+    """
+    # ── Validate MIME type ──────────────────────────────────────────────────
+    content_type = (image.content_type or "").lower()
+    if content_type not in _ALLOWED_IMAGE_MIMETYPES:
+        # Attempt to guess from filename
+        import mimetypes as _mimetypes
+        guessed, _ = _mimetypes.guess_type(image.filename or "")
+        if guessed and guessed.lower() in _ALLOWED_IMAGE_MIMETYPES:
+            content_type = guessed.lower()
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Unsupported file type '{content_type}'. "
+                    "Please upload a JPEG, PNG, WEBP, or GIF image."
+                ),
+            )
+
+    # ── Read & size-check ───────────────────────────────────────────────────
+    image_bytes = await image.read()
+    if len(image_bytes) > _MAX_IMAGE_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail="Image too large. Maximum allowed size is 10 MB.",
+        )
+    if not image_bytes:
+        raise HTTPException(status_code=400, detail="Empty image file.")
+
+    # ── Resolve session ─────────────────────────────────────────────────────
+    current_session_id = session_id or str(uuid.uuid4())
+
+    # Ensure the ADK session exists so the next /chat turn can attach to it
+    if current_session_id not in _active_sessions:
+        try:
+            await adk_session_service.create_session(
+                app_name=APP_NAME,
+                user_id=USER_ID,
+                session_id=current_session_id,
+            )
+            _active_sessions.add(current_session_id)
+        except Exception as _e:
+            logger.warning(f"Could not pre-create ADK session for image upload: {_e}")
+
+    # ── Analyse image ───────────────────────────────────────────────────────
+    vision_svc = get_vision_service()
+    analysis = await vision_svc.analyse_image(
+        image_bytes=image_bytes,
+        mime_type=content_type,
+        session_id=current_session_id,
+        patient_id=None,  # resolved below if authenticated
+    )
+
+    # ── Store context note for next chat turn ───────────────────────────────
+    _pending_image_contexts[current_session_id] = analysis["prompt_note"]
+    logger.info(
+        f"Image context stored for session={current_session_id}: "
+        f"type={analysis['image_type']}, urgency={analysis['urgency_flag']}"
+    )
+
+    # ── Persist to memory (background, authenticated only) ──────────────────
+    user_id = current_user["sub"] if current_user else None
+    if user_id:
+        db_bg = DatabaseManager()
+        memory_svc = MemoryService(db_bg)
+
+        async def _persist():
+            try:
+                patient_id = await memory_svc.get_patient_id(user_id)
+                if patient_id:
+                    await vision_svc.persist_to_memory(
+                        db=db_bg,
+                        patient_id=patient_id,
+                        session_id=current_session_id,
+                        analysis=analysis,
+                        filename=image.filename or "upload",
+                    )
+            except Exception as _exc:
+                logger.warning(f"Vision persist background task failed: {_exc}")
+
+        background_tasks.add_task(_persist)
+
+    return ImageAnalysisResponse(
+        image_type=analysis["image_type"],
+        description=analysis["description"],
+        medical_context=analysis.get("medical_context", ""),
+        suggested_questions=analysis.get("suggested_questions", []),
+        urgency_flag=analysis.get("urgency_flag", "none"),
+        session_id=current_session_id,
+    )
+
+
+# ── Voice Pipeline: Gemini STT → Gemini ADK → edge-tts TTS ──────────────────
+#
+# POST /chat/voice
+# Accepts multipart/form-data:
+#   audio    — audio file (webm/mp4/wav/ogg/mp3)
+#   session_id — optional existing session ID
+#
+# Returns:
+#   audio/mpeg stream (MP3 from edge-tts)
+#   Headers:
+#     X-Transcript  — user's transcribed text
+#     X-AI-Text     — AI text response (stripped of markdown)
+#     X-Session-Id  — session ID used
+#
+
+_VOICE_AUDIO_MIMETYPES = {
+    "audio/webm", "audio/mp4", "audio/wav", "audio/wave",
+    "audio/ogg", "audio/mpeg", "audio/mp3",
+    "application/octet-stream",  # Safari often sends this
+}
+_MAX_VOICE_BYTES = 25 * 1024 * 1024  # 25 MB max
+
+# edge-tts voices: Devanagari script → Hindi voice, otherwise Indian English
+_TTS_VOICE_HI = "hi-IN-SwaraNeural"
+_TTS_VOICE_EN = "en-IN-NeerjaNeural"
+_DEVANAGARI_RE = None  # Lazy-compiled regex
+
+
+def _get_tts_voice(text: str) -> str:
+    """Return the appropriate edge-tts voice based on script detection."""
+    global _DEVANAGARI_RE
+    import re as _re
+    if _DEVANAGARI_RE is None:
+        _DEVANAGARI_RE = _re.compile(r'[\u0900-\u097F]')
+    return _TTS_VOICE_HI if _DEVANAGARI_RE.search(text) else _TTS_VOICE_EN
+
+
+async def _edge_tts_to_bytes(text: str, voice: str) -> bytes:
+    """Generate MP3 audio bytes from text using edge-tts."""
+    import edge_tts
+    import io
+    buf = io.BytesIO()
+    communicate = edge_tts.Communicate(text, voice)
+    async for chunk in communicate.stream():
+        if chunk["type"] == "audio":
+            buf.write(chunk["data"])
+    return buf.getvalue()
+
+
+async def _tts_to_bytes(text: str) -> bytes:
+    """Generate MP3 audio bytes — ElevenLabs if configured, else edge-tts fallback.
+
+    ElevenLabs requires a paid plan for API access. When ELEVENLABS_API_KEY is set
+    and the request succeeds, it is used. On any failure (free-tier 402, network,
+    etc.) the function falls back to edge-tts transparently.
+    """
+    el_key = os.getenv("ELEVENLABS_API_KEY", "")
+    if el_key:
+        try:
+            import httpx as _httpx
+
+            voice_id = os.getenv("ELEVENLABS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM")
+            model_id = os.getenv("ELEVENLABS_MODEL_ID", "eleven_multilingual_v2")
+
+            async with _httpx.AsyncClient(timeout=15) as _el_client:
+                resp = await _el_client.post(
+                    f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}",
+                    headers={
+                        "xi-api-key": el_key,
+                        "Content-Type": "application/json",
+                        "Accept": "audio/mpeg",
+                    },
+                    json={
+                        "text": text,
+                        "model_id": model_id,
+                        "voice_settings": {"stability": 0.5, "similarity_boost": 0.75},
+                    },
+                )
+            if resp.status_code == 200:
+                return resp.content
+            logger.warning(
+                f"ElevenLabs TTS returned {resp.status_code}: {resp.text[:200]} — "
+                "falling back to edge-tts"
+            )
+        except Exception as el_err:
+            logger.warning(f"ElevenLabs TTS error: {el_err} — falling back to edge-tts")
+
+    # Fallback: edge-tts (free, always available)
+    _voice = _get_tts_voice(text)
+    return await _edge_tts_to_bytes(text, _voice)
+
+
+@app.post("/chat/voice")
+@limiter.limit("20/minute")
+async def voice_chat_endpoint(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    audio: UploadFile = File(...),
+    session_id: Optional[str] = Form(None),
+    current_user: Optional[Dict] = Depends(get_current_user_optional),
+):
+    """
+    Server-side voice pipeline:
+      1. Transcribe audio via Gemini 2.5-flash multimodal STT
+      2. Pass transcript through existing Gemini/ADK chat pipeline (identical to /chat)
+      3. Convert AI text response to speech via edge-tts (hi-IN-SwaraNeural or en-IN-NeerjaNeural)
+      4. Return MP3 audio stream with transcript/AI-text in response headers
+    """
+    from fastapi.responses import StreamingResponse
+    import io
+
+    # ── 1. Read & validate audio file ───────────────────────────────────────
+    audio_bytes = await audio.read()
+    if not audio_bytes:
+        raise HTTPException(status_code=400, detail="Empty audio file.")
+    if len(audio_bytes) > _MAX_VOICE_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail="Audio file too large. Maximum size is 25 MB.",
+        )
+
+    # Pre-STT setup — user_id and session are known before transcription completes
+    import asyncio as _aio
+    user_id = current_user["sub"] if current_user else None
+    current_session_id = session_id or str(uuid.uuid4())
+    is_new = current_session_id not in _voice_active_sessions
+    db_for_memory = DatabaseManager() if user_id else None
+    memory_svc = MemoryService(db_for_memory) if db_for_memory else None
+
+    set_current_user(
+        user_id or "",
+        name             = (current_user or {}).get("name", ""),
+        email            = (current_user or {}).get("email", ""),
+        is_authenticated = current_user is not None,
+    )
+
+    # ── 2. Parallel: STT + session creation + patient ID lookup ─────────────
+    # All three are independent — run concurrently to eliminate serial waiting.
+    try:
+        _ct = (audio.content_type or "").lower()
+        if "mp4" in _ct or "m4a" in _ct:
+            _audio_filename = "audio.mp4"
+            _audio_mime = "audio/mp4"
+        elif "wav" in _ct or "wave" in _ct:
+            _audio_filename = "audio.wav"
+            _audio_mime = "audio/wav"
+        elif "ogg" in _ct:
+            _audio_filename = "audio.ogg"
+            _audio_mime = "audio/ogg"
+        elif "mpeg" in _ct or "mp3" in _ct:
+            _audio_filename = "audio.mp3"
+            _audio_mime = "audio/mpeg"
+        else:
+            _audio_filename = "audio.webm"
+            _audio_mime = "audio/webm"  # default — Chrome MediaRecorder output
+
+        async def _run_stt_async():
+            """Transcribe via ElevenLabs Scribe v1 (~0.9s). Falls back to Gemini on failure."""
+            import httpx as _hx
+            _el_key = os.getenv("ELEVENLABS_API_KEY", "")
+            if _el_key:
+                try:
+                    async with _hx.AsyncClient(timeout=30) as _stt_client:
+                        resp = await _stt_client.post(
+                            "https://api.elevenlabs.io/v1/speech-to-text",
+                            headers={"xi-api-key": _el_key},
+                            files={"file": (_audio_filename, audio_bytes, _audio_mime)},
+                            data={
+                                "model_id": "scribe_v1",
+                                "tag_audio_events": "false",
+                                "diarize": "false",
+                            },
+                        )
+                    if resp.status_code == 200:
+                        return resp.json().get("text", "").strip()
+                    logger.warning(f"ElevenLabs STT {resp.status_code} — falling back to Gemini STT")
+                except Exception as _stt_err:
+                    logger.warning(f"ElevenLabs STT error: {_stt_err} — falling back to Gemini STT")
+
+            # Fallback: Gemini 2.5-flash STT (thinking disabled for speed)
+            logger.info("Using Gemini STT fallback")
+            from google.genai import types as _stt_types
+            def _gemini_stt():
+                from google import genai as _stt_genai
+                _c = _stt_genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
+                return _c.models.generate_content(
+                    model="gemini-2.5-flash",
+                    contents=[
+                        _stt_types.Part.from_bytes(data=audio_bytes, mime_type=_audio_mime),
+                        _stt_types.Part.from_text(text=(
+                            "Transcribe this audio exactly as spoken. "
+                            "Output ONLY the transcribed text, nothing else. "
+                            "Preserve the original language (Hindi or English or mixed Hinglish)."
+                        )),
+                    ],
+                    config=_stt_types.GenerateContentConfig(
+                        thinking_config=_stt_types.ThinkingConfig(thinking_budget=0),
+                    ),
+                )
+            stt_resp = await _aio.to_thread(_gemini_stt)
+            return (stt_resp.text or "").strip()
+
+        async def _create_session_if_new():
+            if is_new:
+                await _voice_session_service.create_session(
+                    app_name=APP_NAME + "_voice",
+                    user_id=USER_ID,
+                    session_id=current_session_id,
+                )
+                _voice_active_sessions.add(current_session_id)
+
+        async def _fetch_patient_context():
+            """Fetch patient_id + full context in one chained call — runs parallel with STT."""
+            if not (user_id and memory_svc):
+                return None, {"facts": {}, "recent_summaries": []}
+            pid = await memory_svc.get_patient_id(user_id)
+            if not pid:
+                return None, {"facts": {}, "recent_summaries": []}
+            ctx = await memory_svc.get_patient_context(pid, query_text=None)
+            return pid, ctx
+
+        transcript, _, (patient_id, patient_context) = await _aio.gather(
+            _run_stt_async(),
+            _create_session_if_new(),
+            _fetch_patient_context(),
+        )
+
+        logger.info(f"STT transcript ({len(transcript)} chars): '{transcript[:120]}'")
+    except Exception as e:
+        logger.error(f"STT error: {e}", exc_info=True)
+        raise HTTPException(status_code=502, detail=f"Speech transcription failed: {str(e)}")
+
+    if not transcript or len(transcript) < 3:
+        # Instead of a hard error, return a graceful TTS nudge so the conversation continues
+        _noise_text = "Sorry, I couldn't hear that clearly — could you speak again?"
+        try:
+            _noise_audio = await _tts_to_bytes(_noise_text)
+        except Exception:
+            _noise_audio = b""
+
+        from fastapi.responses import StreamingResponse as _SR
+        import urllib.parse as _ulp_n
+        _safe_n = lambda v: _ulp_n.quote(v.replace("\n", " "), safe=" !\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~")[:500]
+        _noise_hdrs = {
+            "X-Transcript": "",
+            "X-AI-Text": _safe_n(_noise_text),
+            "X-Session-Id": current_session_id,
+            "Access-Control-Expose-Headers": "X-Transcript, X-AI-Text, X-Session-Id",
+        }
+        if _noise_audio:
+            return _SR(io.BytesIO(_noise_audio), media_type="audio/mpeg", headers=_noise_hdrs)
+        raise HTTPException(status_code=400, detail=_noise_text)
+
+    # ── 3. Run through existing Gemini/ADK chat pipeline ─────────────────────
+    # user_id, current_session_id, is_new, memory_svc, patient_id, patient_context
+    # are all already set above from the parallel phase.
+    chat_request = ChatRequest(message=transcript, session_id=session_id)
+
+    triage_result = _triage_engine.score(transcript, patient_context)
+
+    if triage_result.is_hard_emergency:
+        logger.warning(f"HARD EMERGENCY in voice turn: session={current_session_id}")
+        emergency_resp = triage_result.emergency_response
+        # TTS for emergency response
+        try:
+            _emrg_text = stripMarkdown_py(emergency_resp)
+            audio_data = await _tts_to_bytes(_emrg_text)
+        except Exception as tts_err:
+            logger.error(f"TTS error for emergency response: {tts_err}")
+            audio_data = b""
+
+        def _safe_hdr_emrg(v: str, n: int = 500) -> str:
+            import urllib.parse as _ulp_emrg
+            s = v.replace("\r\n", " ").replace("\n", " ").replace("\r", " ")
+            return _ulp_emrg.quote(s, safe=" !\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~")[:n]
+
+        headers = {
+            "X-Transcript":  _safe_hdr_emrg(transcript),
+            "X-AI-Text":     _safe_hdr_emrg(emergency_resp),
+            "X-Session-Id":  current_session_id,
+            "Access-Control-Expose-Headers": "X-Transcript, X-AI-Text, X-Session-Id",
+        }
+        if audio_data:
+            return StreamingResponse(
+                io.BytesIO(audio_data),
+                media_type="audio/mpeg",
+                headers=headers,
+            )
+        raise HTTPException(status_code=200, detail=emergency_resp)
+
+    # Emotional + memory context
+    emotional_ctx = _emotional_builder.build(
+        current_message=transcript,
+        memory_facts=patient_context.get("facts", {}),
+        is_first_message=is_new,
+    )
+    memory_note  = ""
+    _name_facts  = patient_context.get("facts", {}).get("preference", [])
+    patient_name = next((f["value"] for f in _name_facts if f["key"] == "name"), "")
+    if not patient_name:
+        patient_name = (current_user or {}).get("name", "") if user_id else ""
+    if is_new and patient_id and memory_svc:
+        memory_note = memory_svc.format_context_for_prompt(patient_context)
+
+    if is_new and memory_note:
+        adapted_message = _context_builder.build_first_message(
+            message=transcript,
+            memory_note=memory_note,
+            emotional_note=emotional_ctx["system_note"],
+            triage_note="",
+            patient_name=patient_name if memory_note else None,
+        )
+    else:
+        adapted_message = _context_builder.build(
+            message=transcript,
+            emotional_note=emotional_ctx["system_note"],
+            triage_note="",
+        )
+
+    # Inject pending image context if present
+    _image_ctx = _pending_image_contexts.pop(current_session_id, None)
+    if _image_ctx:
+        adapted_message = f"{_image_ctx}\n\n{adapted_message}"
+
+    # ── Voice LLM: Groq (primary, ~0.4s) → Gemini fallback (~1.7s) ─────────
+    # Build first-turn greeting note if this is a new session with no known patient name
+    _is_first_voice_turn = is_new and not patient_name
+
+    # Build first-turn greeting note if this is a new session with no known patient name
+    _is_first_voice_turn = is_new and not patient_name
+    _first_turn_note = (
+        "\n\n[SYSTEM NOTE — FIRST MESSAGE]\n"
+        "This is the very first message of this conversation. "
+        "Greet the patient warmly and briefly, then ask for their name, age, and gender "
+        "in a single natural sentence. Example: "
+        "\"Hi there! I'm Medivora, your AI health assistant. Before we begin, could you quickly share your name, age, and gender so I can assist you better?\"\n"
+        "Do NOT provide any medical advice yet — just greet and ask."
+        if _is_first_voice_turn else ""
+    )
+
+    # Groq-specific system prompt: conversational prose — NOT a numbered checklist.
+    # Llama models tend to follow numbered lists procedurally, making responses feel robotic.
+    # Written as flowing instructions so Groq stays natural and warm.
+    _groq_system = """You are Medivora — a warm, caring AI medical companion in India, speaking to a patient on a voice call. Think of yourself as a trusted family doctor who genuinely cares about this person.
+
+Detect the language from the patient's message and mirror it exactly: English message → reply in English, Roman Hindi / Hinglish message (like "mujhe bukhar hai") → reply in Hinglish, Devanagari Hindi (like "मुझे बुखार है") → reply in Hindi Devanagari. Never switch to Tamil, Telugu, Bengali, Punjabi, Marathi, Gujarati or any other language — default to English if you are unsure.
+
+You are on a voice call so speak naturally and humanly — exactly like a caring person would speak, never like a form or checklist. Your entire response must be 2 to 3 short spoken sentences, nothing more. Never use markdown, bullet points, numbered lists, asterisks, colons before lists, or headers of any kind — just plain warm spoken words.
+
+Always open with genuine empathy or reassurance first, never with a diagnosis or the worst-case scenario. Then give just one practical thing the patient can do right now. Close by letting them know they can speak to a real doctor whenever they need to. If the patient sounds worried or upset, be extra gentle and human. Never mention specific medicine names or dosages.
+
+One exception: if you detect a hard emergency like severe chest pain with sweating, someone unconscious, or severe uncontrolled bleeding — your very first words must be "Please call 108 immediately."
+
+EXAMPLE — Patient says: "I have a headache and fever for two days."
+You say: "I understand how draining that must feel — two days of headache with fever is really exhausting. Please rest, drink plenty of fluids, and take paracetamol if you haven't already. If your fever crosses 103°F or the headache gets worse, do speak to a doctor today."
+
+EXAMPLE — Patient says: "mujhe do din se sir dard aur bukhar hai"
+You say: "Arey, do din se sir dard aur bukhar — yeh sach mein bahut thaka deta hai. Abhi thoda rest karo, paani zyada piyo, aur agar paracetamol nahi li toh le lo. Agar bukhar 103 se upar jaye toh ek doctor se zaroor milna."
+"""
+
+    groq_key = os.getenv("GROQ_API_KEY", "")
+    final_response = ""
+
+    if groq_key:
+        try:
+            import httpx as _hx
+            async with _hx.AsyncClient(timeout=10) as _groq_client:
+                r = await _groq_client.post(
+                    "https://api.groq.com/openai/v1/chat/completions",
+                    headers={"Authorization": f"Bearer {groq_key}", "Content-Type": "application/json"},
+                    json={
+                        "model": "llama-3.3-70b-versatile",
+                        "messages": [
+                            {"role": "system", "content": _groq_system},
+                            {"role": "user",   "content": adapted_message + _first_turn_note},
+                        ],
+                        "max_tokens": 150,
+                        "temperature": 0.3,
+                    },
+                )
+            if r.status_code == 200:
+                final_response = r.json()["choices"][0]["message"]["content"].strip()
+                logger.info(f"Groq voice response ({len(final_response)} chars)")
+            else:
+                logger.warning(f"Groq returned {r.status_code}: {r.text[:200]} — falling back to Gemini")
+        except Exception as _groq_err:
+            logger.warning(f"Groq error: {_groq_err} — falling back to Gemini")
+            final_response = ""
+
+    if not final_response:
+        # Fallback: Gemini voice agent (ADK runner, thinking=0)
+        content = genai_types.Content(
+            role="user",
+            parts=[genai_types.Part.from_text(text=adapted_message)],
+        )
+        async for event in _voice_runner.run_async(
+            session_id=current_session_id,
+            user_id=USER_ID,
+            new_message=content,
+        ):
+            if event.is_final_response() and event.content and event.content.parts:
+                for part in event.content.parts:
+                    text = getattr(part, "text", None)
+                    if text:
+                        final_response = text
+                        break
+        if final_response:
+            logger.info(f"Gemini fallback voice response ({len(final_response)} chars)")
+
+    if not final_response:
+        final_response = "I'm sorry, I couldn't process your message. Please try again."
+
+    final_response = soften_response(final_response)
+
+    # Safety validation
+    raw_response   = final_response
+    safety_result  = _safety_validator.validate(
+        response=final_response,
+        patient_context=patient_context,
+        session_id=current_session_id,
+        patient_id=patient_id,
+    )
+    final_response = safety_result.response
+
+    # Voice turns are NOT persisted to chat history — voice is a separate modality.
+    # Only extract memory facts in background (useful for future sessions).
+    if user_id and memory_svc and patient_id:
+        background_tasks.add_task(
+            memory_svc.extract_and_store_facts,
+            patient_id, current_session_id,
+            f"Patient: {transcript}\n\nAI: {final_response}",
+        )
+
+    # ── 4. edge-tts TTS ──────────────────────────────────────────────────────
+    tts_text = stripMarkdown_py(final_response)
+
+    # Voice: strip the long formatted medical report card (📋 MEDIVORA HEALTH
+    # ASSESSMENT) — reading it aloud adds ~5s and adds no conversational value.
+    # Keep only the first meaningful spoken paragraph before the card.
+    import re as _re_tts
+    _card_start = _re_tts.search(r'📋\s*MEDIVORA|MEDIVORA HEALTH ASSESSMENT', tts_text)
+    if _card_start:
+        tts_text = tts_text[:_card_start.start()].strip()
+        if not tts_text:
+            # If nothing precedes the card, read just severity + next step
+            _sev = _re_tts.search(r'(MILD|MODERATE|SEVERE|VERY.SEVERE)[^\n]*', final_response)
+            _step = _re_tts.search(r'NEXT STEP[^\n]*\n([^\n]+)', final_response)
+            parts = []
+            if _sev: parts.append(_sev.group(0).strip())
+            if _step: parts.append(_step.group(1).strip())
+            tts_text = ". ".join(parts) if parts else "Your assessment is ready. Please check the screen for details."
+
+    # Truncate to 800 chars for voice — keeps TTS fast (~1s) and audio short
+    if len(tts_text) > 800:
+        tts_text = tts_text[:800].rsplit(' ', 1)[0] + "…"
+
+    try:
+        audio_data = await _tts_to_bytes(tts_text)
+        logger.info(
+            f"TTS generated {len(audio_data)} bytes for session={current_session_id}"
+        )
+    except Exception as tts_err:
+        logger.error(f"TTS error: {tts_err}", exc_info=True)
+        raise HTTPException(status_code=502, detail=f"Text-to-speech failed: {str(tts_err)}")
+
+    def _safe_header(value: str, max_len: int = 500) -> str:
+        """Sanitise a string for use as an HTTP header value.
+
+        HTTP/1.1 headers must be Latin-1 safe. Non-ASCII chars are
+        percent-encoded (RFC 3986) so the header stays valid.
+        The frontend must call decodeURIComponent() to decode them back.
+        """
+        import urllib.parse as _ulp
+        sanitised = value.replace("\r\n", " ").replace("\n", " ").replace("\r", " ")
+        encoded = _ulp.quote(sanitised, safe=" !\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~")
+        return encoded[:max_len]
+
+    headers = {
+        "X-Transcript":  _safe_header(transcript),
+        "X-AI-Text":     _safe_header(final_response),
+        "X-Session-Id":  current_session_id,
+        "Access-Control-Expose-Headers": "X-Transcript, X-AI-Text, X-Session-Id",
+    }
+
+    return StreamingResponse(
+        io.BytesIO(audio_data),
+        media_type="audio/mpeg",
+        headers=headers,
+    )
+
+
+def stripMarkdown_py(text: str) -> str:
+    """Strip markdown formatting for TTS — mirrors frontend stripMarkdown()."""
+    import re as _re
+    text = _re.sub(r'\*\*(.*?)\*\*', r'\1', text)
+    text = _re.sub(r'\*(.*?)\*', r'\1', text)
+    text = _re.sub(r'#{1,6}\s*', '', text)
+    text = _re.sub(r'`{1,3}[^`]*`{1,3}', '', text)
+    text = _re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', text)
+    text = text.replace('&nbsp;', ' ').replace('•', '').replace('📋', '').replace('💙', '')
+    text = _re.sub(r'<[^>]+>', '', text)
+    text = _re.sub(r'\n{2,}', '. ', text)
+    text = text.replace('\n', ' ')
+    return text.strip()
+
 
 # ── Pre-login Chat Restore ───────────────────────────────────────
 
@@ -875,7 +1656,7 @@ async def send_otp(request: Request, phone: str = Form(...)):
     """
     Send a 6-digit OTP to the given phone number.
     In development (no SMS provider configured), the OTP is returned directly.
-    In production, set SMS_PROVIDER=twilio and configure TWILIO_* env vars.
+    In production, set SMS_PROVIDER=msg91 and configure MSG91_* env vars.
     """
     import random
     phone = phone.strip()
@@ -888,18 +1669,26 @@ async def send_otp(request: Request, phone: str = Form(...)):
 
     # Check if a real SMS provider is configured
     sms_provider = os.getenv("SMS_PROVIDER", "demo")
-    if sms_provider == "twilio":
+    if sms_provider == "msg91":
         try:
-            from twilio.rest import Client as TwilioClient
-            tc = TwilioClient(os.getenv("TWILIO_ACCOUNT_SID"), os.getenv("TWILIO_AUTH_TOKEN"))
-            tc.messages.create(
-                body=f"Your Medivora OTP is: {otp}. Valid for 1 minute.",
-                from_=os.getenv("TWILIO_FROM_NUMBER"),
-                to=phone,
+            import httpx as _httpx
+            payload = {
+                "flow_id": os.getenv("MSG91_OTP_TEMPLATE_ID", ""),
+                "sender": os.getenv("MSG91_SENDER_ID", "MEDVRA"),
+                "mobiles": phone,
+                "OTP": otp,
+            }
+            resp = _httpx.post(
+                "https://control.msg91.com/api/v5/flow/",
+                json=payload,
+                headers={"authkey": os.getenv("MSG91_AUTH_KEY", ""), "Content-Type": "application/json"},
+                timeout=10,
             )
-            return {"message": "OTP sent via SMS", "demo": False}
+            if resp.status_code == 200:
+                return {"message": "OTP sent via SMS", "demo": False}
+            logger.error(f"MSG91 SMS failed: {resp.status_code} {resp.text}")
         except Exception as e:
-            logger.error(f"Twilio SMS failed: {e}")
+            logger.error(f"MSG91 SMS failed: {e}")
             # Fall through to demo mode
 
     # Demo mode — return OTP in response so dev can test without SMS
@@ -2239,18 +3028,26 @@ async def doctor_send_otp(request: Request, phone: str = Form(...)):
     await db.create_otp(phone, otp, ttl_minutes=1)
     logger.info(f"Doctor OTP generated for {phone}: {otp}")
     sms_provider = os.getenv("SMS_PROVIDER", "demo")
-    if sms_provider == "twilio":
+    if sms_provider == "msg91":
         try:
-            from twilio.rest import Client as TwilioClient
-            tc = TwilioClient(os.getenv("TWILIO_ACCOUNT_SID"), os.getenv("TWILIO_AUTH_TOKEN"))
-            tc.messages.create(
-                body=f"Your Medivora Doctor Portal OTP is: {otp}. Valid for 1 minute.",
-                from_=os.getenv("TWILIO_FROM_NUMBER"),
-                to=phone,
+            import httpx as _httpx
+            payload = {
+                "flow_id": os.getenv("MSG91_OTP_TEMPLATE_ID", ""),
+                "sender": os.getenv("MSG91_SENDER_ID", "MEDVRA"),
+                "mobiles": phone,
+                "OTP": otp,
+            }
+            resp = _httpx.post(
+                "https://control.msg91.com/api/v5/flow/",
+                json=payload,
+                headers={"authkey": os.getenv("MSG91_AUTH_KEY", ""), "Content-Type": "application/json"},
+                timeout=10,
             )
-            return {"message": "OTP sent via SMS", "demo": False}
+            if resp.status_code == 200:
+                return {"message": "OTP sent via SMS", "demo": False}
+            logger.error(f"MSG91 SMS failed: {resp.status_code} {resp.text}")
         except Exception as e:
-            logger.error(f"Twilio SMS failed: {e}")
+            logger.error(f"MSG91 SMS failed: {e}")
     return {"message": "OTP ready (demo mode)", "demo": True, "otp": otp}
 
 
