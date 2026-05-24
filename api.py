@@ -377,6 +377,32 @@ def _is_greeting(text: str) -> bool:
     return cleaned in _GREETING_WORDS or len(cleaned) <= 3
 
 
+async def _bg_persist_voice_turn(
+    session_id: str, uid: str, new_session: bool,
+    msg: str, resp: str, raw_resp: str,
+    safety_res, pid, mem_svc, session_summary: str,
+):
+    """Background task: all DB/memory work after a voice turn. Non-blocking for the audio response."""
+    db = DatabaseManager()
+    if new_session:
+        title = await _generate_session_title(msg, resp)
+        await db.create_chat_session(session_id, uid, title)
+    else:
+        await _maybe_update_session_title(db, session_id, msg, resp)
+    await db.save_chat_message(session_id, uid, "ai", resp)
+    if safety_res.events and pid:
+        await log_safety_events(db, safety_res, session_id, pid, raw_resp)
+    if mem_svc and pid:
+        await mem_svc.extract_and_store_facts(pid, session_id, f"Patient: {msg}\n\nAI: {resp}")
+        if "📋" in resp and "assessment" in resp.lower():
+            outcome = (
+                "emergency" if safety_res.has_emergency else
+                ("consultation_booked" if "book an appointment" in resp.lower() else "prescription_pending")
+            )
+            await mem_svc.save_session_summary(pid, session_id, session_summary or resp, outcome)
+    await db.touch_chat_session(session_id)
+
+
 async def _generate_session_title(message: str, ai_response: str = "") -> str:
     """Use Gemini to generate a short medical condition noun/phrase for the chat title.
     Uses the patient message + optionally the AI response for better context."""
@@ -1290,45 +1316,14 @@ async def voice_chat_endpoint(
     if msg_count % 5 == 0:
         final_response += "\n\n_Just a reminder — everything you share here is completely private and stays between us._ 💙"
 
-    # Persist to DB (same as text chat)
+    # All DB/memory work runs in the background — audio response does not depend on it.
     if user_id:
-        db = DatabaseManager()
-        if is_new:
-            title = await _generate_session_title(transcript, final_response)
-            await db.create_chat_session(current_session_id, user_id, title)
-        else:
-            await _maybe_update_session_title(db, current_session_id, transcript, final_response)
-        await db.save_chat_message(current_session_id, user_id, "ai", final_response)
-
-        if safety_result.events and patient_id:
-            background_tasks.add_task(
-                log_safety_events, db, safety_result,
-                current_session_id, patient_id, raw_response,
-            )
-
-        if memory_svc and patient_id:
-            background_tasks.add_task(
-                memory_svc.extract_and_store_facts,
-                patient_id, current_session_id,
-                f"Patient: {transcript}\n\nAI: {final_response}",
-            )
-            is_medical_report_turn = (
-                "📋" in final_response and
-                "assessment" in final_response.lower()
-            )
-            if is_medical_report_turn:
-                outcome = "emergency" if safety_result.has_emergency else (
-                    "consultation_booked" if "book an appointment" in final_response.lower() else
-                    "prescription_pending"
-                )
-                background_tasks.add_task(
-                    memory_svc.save_session_summary,
-                    patient_id, current_session_id,
-                    _session_summary or final_response,
-                    outcome,
-                )
-
-        await db.touch_chat_session(current_session_id)
+        background_tasks.add_task(
+            _bg_persist_voice_turn,
+            current_session_id, user_id, is_new,
+            transcript, final_response, raw_response,
+            safety_result, patient_id, memory_svc, _session_summary,
+        )
 
     # ── 4. edge-tts TTS ──────────────────────────────────────────────────────
     tts_text = stripMarkdown_py(final_response)
