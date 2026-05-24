@@ -1051,7 +1051,7 @@ async def voice_chat_endpoint(
     import asyncio as _aio
     user_id = current_user["sub"] if current_user else None
     current_session_id = session_id or str(uuid.uuid4())
-    is_new = current_session_id not in _voice_active_sessions
+    is_new = current_session_id not in _active_sessions
     db_for_memory = DatabaseManager() if user_id else None
     memory_svc = MemoryService(db_for_memory) if db_for_memory else None
 
@@ -1130,12 +1130,12 @@ async def voice_chat_endpoint(
 
         async def _create_session_if_new():
             if is_new:
-                await _voice_session_service.create_session(
-                    app_name=APP_NAME + "_voice",
+                await adk_session_service.create_session(
+                    app_name=APP_NAME,
                     user_id=USER_ID,
                     session_id=current_session_id,
                 )
-                _voice_active_sessions.add(current_session_id)
+                _active_sessions.add(current_session_id)
 
         async def _fetch_patient_context():
             """Fetch patient_id + full context in one chained call — runs parallel with STT."""
@@ -1250,99 +1250,36 @@ async def voice_chat_endpoint(
     if _image_ctx:
         adapted_message = f"{_image_ctx}\n\n{adapted_message}"
 
-    # ── Voice LLM: Groq (primary, ~0.4s) → Gemini fallback (~1.7s) ─────────
-    # Build first-turn greeting note if this is a new session with no known patient name
-    _is_first_voice_turn = is_new and not patient_name
+    # ── 3b. Run through the same ADK agent pipeline as /chat ────────────────
+    msg_count = get_message_count(current_session_id)
 
-    # Build first-turn greeting note if this is a new session with no known patient name
-    _is_first_voice_turn = is_new and not patient_name
-    _first_turn_note = (
-        "\n\n[SYSTEM NOTE — FIRST MESSAGE]\n"
-        "This is the very first message of this conversation. "
-        "Greet the patient warmly and briefly, then ask for their name, age, and gender "
-        "in a single natural sentence. Example: "
-        "\"Hi there! I'm Medivora, your AI health assistant. Before we begin, could you quickly share your name, age, and gender so I can assist you better?\"\n"
-        "Do NOT provide any medical advice yet — just greet and ask."
-        if _is_first_voice_turn else ""
+    content = genai_types.Content(
+        role="user",
+        parts=[genai_types.Part.from_text(text=adapted_message)],
     )
 
-    # Groq-specific system prompt: conversational prose — NOT a numbered checklist.
-    # Llama models tend to follow numbered lists procedurally, making responses feel robotic.
-    # Written as flowing instructions so Groq stays natural and warm.
-    _groq_system = """You are Medivora — a warm, caring AI medical companion in India, speaking to a patient on a voice call. Think of yourself as a trusted family doctor who genuinely cares about this person.
-
-Detect the language from the patient's message and mirror it exactly: English message → reply in English, Roman Hindi / Hinglish message (like "mujhe bukhar hai") → reply in Hinglish, Devanagari Hindi (like "मुझे बुखार है") → reply in Hindi Devanagari. Never switch to Tamil, Telugu, Bengali, Punjabi, Marathi, Gujarati or any other language — default to English if you are unsure.
-
-You are on a voice call so speak naturally and humanly — exactly like a caring person would speak, never like a form or checklist. Your entire response must be 2 to 3 short spoken sentences, nothing more. Never use markdown, bullet points, numbered lists, asterisks, colons before lists, or headers of any kind — just plain warm spoken words.
-
-Always open with genuine empathy or reassurance first, never with a diagnosis or the worst-case scenario. Then give just one practical thing the patient can do right now. Close by letting them know they can speak to a real doctor whenever they need to. If the patient sounds worried or upset, be extra gentle and human. Never mention specific medicine names or dosages.
-
-One exception: if you detect a hard emergency like severe chest pain with sweating, someone unconscious, or severe uncontrolled bleeding — your very first words must be "Please call 108 immediately."
-
-EXAMPLE — Patient says: "I have a headache and fever for two days."
-You say: "I understand how draining that must feel — two days of headache with fever is really exhausting. Please rest, drink plenty of fluids, and take paracetamol if you haven't already. If your fever crosses 103°F or the headache gets worse, do speak to a doctor today."
-
-EXAMPLE — Patient says: "mujhe do din se sir dard aur bukhar hai"
-You say: "Arey, do din se sir dard aur bukhar — yeh sach mein bahut thaka deta hai. Abhi thoda rest karo, paani zyada piyo, aur agar paracetamol nahi li toh le lo. Agar bukhar 103 se upar jaye toh ek doctor se zaroor milna."
-"""
-
-    groq_key = os.getenv("GROQ_API_KEY", "")
-    final_response = ""
-
-    if groq_key:
-        try:
-            import httpx as _hx
-            async with _hx.AsyncClient(timeout=10) as _groq_client:
-                r = await _groq_client.post(
-                    "https://api.groq.com/openai/v1/chat/completions",
-                    headers={"Authorization": f"Bearer {groq_key}", "Content-Type": "application/json"},
-                    json={
-                        "model": "llama-3.3-70b-versatile",
-                        "messages": [
-                            {"role": "system", "content": _groq_system},
-                            {"role": "user",   "content": adapted_message + _first_turn_note},
-                        ],
-                        "max_tokens": 150,
-                        "temperature": 0.3,
-                    },
-                )
-            if r.status_code == 200:
-                final_response = r.json()["choices"][0]["message"]["content"].strip()
-                logger.info(f"Groq voice response ({len(final_response)} chars)")
-            else:
-                logger.warning(f"Groq returned {r.status_code}: {r.text[:200]} — falling back to Gemini")
-        except Exception as _groq_err:
-            logger.warning(f"Groq error: {_groq_err} — falling back to Gemini")
-            final_response = ""
-
-    if not final_response:
-        # Fallback: Gemini voice agent (ADK runner, thinking=0)
-        content = genai_types.Content(
-            role="user",
-            parts=[genai_types.Part.from_text(text=adapted_message)],
-        )
-        async for event in _voice_runner.run_async(
-            session_id=current_session_id,
-            user_id=USER_ID,
-            new_message=content,
-        ):
-            if event.is_final_response() and event.content and event.content.parts:
-                for part in event.content.parts:
-                    text = getattr(part, "text", None)
-                    if text:
-                        final_response = text
-                        break
-        if final_response:
-            logger.info(f"Gemini fallback voice response ({len(final_response)} chars)")
+    final_response = await _run_adk_agent(current_session_id, USER_ID, content)
 
     if not final_response:
         final_response = "I'm sorry, I couldn't process your message. Please try again."
 
+    # Session summary (same as text chat)
+    _session_summary = ""
+    try:
+        _sess = await adk_session_service.get_session(
+            app_name=APP_NAME, user_id=USER_ID, session_id=current_session_id
+        )
+        _session_summary = (_sess.state or {}).get("summary_result", "")
+        if _session_summary and "📋" in _session_summary and _session_summary.strip() not in final_response:
+            final_response = _session_summary.strip() + "\n\n---\n\n" + final_response
+    except Exception:
+        pass
+
     final_response = soften_response(final_response)
 
     # Safety validation
-    raw_response   = final_response
-    safety_result  = _safety_validator.validate(
+    raw_response  = final_response
+    safety_result = _safety_validator.validate(
         response=final_response,
         patient_context=patient_context,
         session_id=current_session_id,
@@ -1350,14 +1287,48 @@ You say: "Arey, do din se sir dard aur bukhar — yeh sach mein bahut thaka deta
     )
     final_response = safety_result.response
 
-    # Voice turns are NOT persisted to chat history — voice is a separate modality.
-    # Only extract memory facts in background (useful for future sessions).
-    if user_id and memory_svc and patient_id:
-        background_tasks.add_task(
-            memory_svc.extract_and_store_facts,
-            patient_id, current_session_id,
-            f"Patient: {transcript}\n\nAI: {final_response}",
-        )
+    if msg_count % 5 == 0:
+        final_response += "\n\n_Just a reminder — everything you share here is completely private and stays between us._ 💙"
+
+    # Persist to DB (same as text chat)
+    if user_id:
+        db = DatabaseManager()
+        if is_new:
+            title = await _generate_session_title(transcript, final_response)
+            await db.create_chat_session(current_session_id, user_id, title)
+        else:
+            await _maybe_update_session_title(db, current_session_id, transcript, final_response)
+        await db.save_chat_message(current_session_id, user_id, "ai", final_response)
+
+        if safety_result.events and patient_id:
+            background_tasks.add_task(
+                log_safety_events, db, safety_result,
+                current_session_id, patient_id, raw_response,
+            )
+
+        if memory_svc and patient_id:
+            background_tasks.add_task(
+                memory_svc.extract_and_store_facts,
+                patient_id, current_session_id,
+                f"Patient: {transcript}\n\nAI: {final_response}",
+            )
+            is_medical_report_turn = (
+                "📋" in final_response and
+                "assessment" in final_response.lower()
+            )
+            if is_medical_report_turn:
+                outcome = "emergency" if safety_result.has_emergency else (
+                    "consultation_booked" if "book an appointment" in final_response.lower() else
+                    "prescription_pending"
+                )
+                background_tasks.add_task(
+                    memory_svc.save_session_summary,
+                    patient_id, current_session_id,
+                    _session_summary or final_response,
+                    outcome,
+                )
+
+        await db.touch_chat_session(current_session_id)
 
     # ── 4. edge-tts TTS ──────────────────────────────────────────────────────
     tts_text = stripMarkdown_py(final_response)
