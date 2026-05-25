@@ -1199,7 +1199,14 @@ async def voice_chat_endpoint(
             "X-Transcript": "",
             "X-AI-Text": _safe_n(_noise_text),
             "X-Session-Id": current_session_id,
-            "Access-Control-Expose-Headers": "X-Transcript, X-AI-Text, X-Session-Id",
+            "X-Is-Medical-Report": "false",
+            "X-Is-Book-Appointment": "false",
+            "X-Triage": "",
+            "X-Specialty": "",
+            "Access-Control-Expose-Headers": (
+                "X-Transcript, X-AI-Text, X-Session-Id, "
+                "X-Is-Medical-Report, X-Is-Book-Appointment, X-Triage, X-Specialty"
+            ),
         }
         if _noise_audio:
             return _SR(io.BytesIO(_noise_audio), media_type="audio/mpeg", headers=_noise_hdrs)
@@ -1229,10 +1236,17 @@ async def voice_chat_endpoint(
             return _ulp_emrg.quote(s, safe=" !\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~")[:n]
 
         headers = {
-            "X-Transcript":  _safe_hdr_emrg(transcript),
-            "X-AI-Text":     _safe_hdr_emrg(emergency_resp),
-            "X-Session-Id":  current_session_id,
-            "Access-Control-Expose-Headers": "X-Transcript, X-AI-Text, X-Session-Id",
+            "X-Transcript":           _safe_hdr_emrg(transcript),
+            "X-AI-Text":              _safe_hdr_emrg(emergency_resp),
+            "X-Session-Id":           current_session_id,
+            "X-Is-Medical-Report":    "false",
+            "X-Is-Book-Appointment":  "false",
+            "X-Triage":               "",
+            "X-Specialty":            "",
+            "Access-Control-Expose-Headers": (
+                "X-Transcript, X-AI-Text, X-Session-Id, "
+                "X-Is-Medical-Report, X-Is-Book-Appointment, X-Triage, X-Specialty"
+            ),
         }
         if audio_data:
             return StreamingResponse(
@@ -1369,11 +1383,68 @@ async def voice_chat_endpoint(
         encoded = _ulp.quote(sanitised, safe=" !\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~")
         return encoded[:max_len]
 
+    # ── Detect triage/booking/report flags (mirrors /chat logic) ───────────────
+    from medivora_agent.tools import _latest_triage, _latest_approval_specialty
+    import json as _json_v
+
+    _v_is_medical_report = (
+        "📋" in final_response and (
+            "medical assessment" in final_response.lower() or
+            "health assessment" in final_response.lower()
+        )
+    )
+    _v_is_book_appointment = "book an appointment" in final_response.lower()
+
+    _v_triage: dict | None = None
+    _v_specialty: str | None = None
+    if user_id and user_id in _latest_triage:
+        _v_triage = _latest_triage.pop(user_id)
+    if user_id and user_id in _latest_approval_specialty:
+        _v_specialty = _latest_approval_specialty.pop(user_id)
+
+    if not _v_specialty:
+        import re as _re_vsp
+        _V_SPEC_ROOTS = [
+            ("gastroenterolog", "gastroenterology"),
+            ("cardiolog",       "cardiology"),
+            ("gynaecolog",      "womens_health"),
+            ("gynecolog",       "womens_health"),
+            ("obstetric",       "womens_health"),
+            ("pediatr",         "pediatrics"),
+            ("paediatr",        "pediatrics"),
+            ("dermatolog",      "dermatology"),
+            ("orthopaed",       "orthopedics"),
+            ("orthoped",        "orthopedics"),
+            ("pulmonolog",      "pulmonology"),
+            ("neurolog",        "neurology"),
+            ("ophthalmolog",    "ophthalmology"),
+            ("otolaryngolog",   "ent"),
+        ]
+        def _v_extract_sp(text):
+            if not text:
+                return None
+            m = _re_vsp.search(r'Special(?:ty|ist)\s+Needed\*?\*?[:\s]+([a-zA-Z_]+)', text, _re_vsp.I)
+            if m:
+                return m.group(1).lower().strip()
+            tl = text.lower()
+            for root, key in _V_SPEC_ROOTS:
+                if root in tl:
+                    return key
+            return None
+        _v_specialty = _v_extract_sp(_session_summary) or _v_extract_sp(final_response)
+
     headers = {
-        "X-Transcript":  _safe_header(transcript),
-        "X-AI-Text":     _safe_header(final_response),
-        "X-Session-Id":  current_session_id,
-        "Access-Control-Expose-Headers": "X-Transcript, X-AI-Text, X-Session-Id",
+        "X-Transcript":           _safe_header(transcript),
+        "X-AI-Text":              _safe_header(final_response),
+        "X-Session-Id":           current_session_id,
+        "X-Is-Medical-Report":    "true" if _v_is_medical_report else "false",
+        "X-Is-Book-Appointment":  "true" if _v_is_book_appointment else "false",
+        "X-Triage":               _safe_header(_json_v.dumps(_v_triage)) if _v_triage else "",
+        "X-Specialty":            _v_specialty or "",
+        "Access-Control-Expose-Headers": (
+            "X-Transcript, X-AI-Text, X-Session-Id, "
+            "X-Is-Medical-Report, X-Is-Book-Appointment, X-Triage, X-Specialty"
+        ),
     }
 
     return StreamingResponse(

@@ -14,6 +14,7 @@ class Settings:
     # Supabase
     SUPABASE_URL: str = os.getenv("SUPABASE_URL", "")
     SUPABASE_KEY: str = os.getenv("SUPABASE_KEY", "")  # service_role key
+    SUPABASE_ANON_KEY: str = os.getenv("SUPABASE_ANON_KEY", "")
 
     # JWT
     JWT_SECRET: str = os.getenv("JWT_SECRET", "CHANGE-ME-use-openssl-rand-hex-32")
