@@ -42,13 +42,13 @@ class Settings:
     LOCKOUT_WINDOW_MINUTES: int = int(os.getenv("LOCKOUT_WINDOW_MINUTES", "15"))
 
     # OTP
-    OTP_TTL_MINUTES: int = int(os.getenv("OTP_TTL_MINUTES", "1"))
+    OTP_TTL_MINUTES: int = int(os.getenv("OTP_TTL_MINUTES", "5"))
     OTP_MOCK_MODE: bool = os.getenv("OTP_MOCK_MODE", "true").lower() == "true"
 
-    # Twilio (required when OTP_MOCK_MODE=false)
-    TWILIO_ACCOUNT_SID: str = os.getenv("TWILIO_ACCOUNT_SID", "")
-    TWILIO_AUTH_TOKEN: str = os.getenv("TWILIO_AUTH_TOKEN", "")
-    TWILIO_FROM_NUMBER: str = os.getenv("TWILIO_FROM_NUMBER", "")
+    # MSG91 — SMS OTP provider for patients
+    MSG91_AUTH_KEY: str = os.getenv("MSG91_AUTH_KEY", "")
+    MSG91_SENDER_ID: str = os.getenv("MSG91_SENDER_ID", "")
+    MSG91_OTP_TEMPLATE_ID: str = os.getenv("MSG91_OTP_TEMPLATE_ID", "")
 
     # Razorpay
     RAZORPAY_KEY_ID: str = os.getenv("RAZORPAY_KEY_ID", "")

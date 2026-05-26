@@ -5,7 +5,9 @@ Auth Router — Signup, Login, OTP endpoints.
 import random
 import string
 
+import httpx
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
+from pydantic import BaseModel
 
 from auth.dependencies import get_current_user
 from auth.jwt_handler import create_token
@@ -23,9 +25,98 @@ from schemas.auth import (
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 
+class _PatientOTPSendRequest(BaseModel):
+    phone: str  # E.164 format, e.g. +919876543210
+
+
+class _PatientOTPVerifyRequest(BaseModel):
+    phone: str
+    otp: str
+
+
 def _generate_otp(length: int = 6) -> str:
     """Generate a random numeric OTP."""
     return "".join(random.choices(string.digits, k=length))
+
+
+async def _send_via_msg91(phone: str, otp: str) -> None:
+    """Send OTP SMS via MSG91 Flow API. Raises HTTPException on failure."""
+    mobiles = phone.lstrip("+")  # MSG91 expects no leading +
+    payload = {
+        "flow_id": settings.MSG91_OTP_TEMPLATE_ID,
+        "sender":  settings.MSG91_SENDER_ID,
+        "mobiles": mobiles,
+        "OTP":     otp,
+    }
+    async with httpx.AsyncClient(timeout=10) as client:
+        resp = await client.post(
+            "https://control.msg91.com/api/v5/flow/",
+            json=payload,
+            headers={"authkey": settings.MSG91_AUTH_KEY, "Content-Type": "application/json"},
+        )
+    if resp.status_code != 200:
+        raise HTTPException(status_code=502, detail=f"MSG91 error {resp.status_code}: {resp.text[:200]}")
+    data = resp.json()
+    if data.get("type") == "error":
+        raise HTTPException(status_code=502, detail=f"MSG91: {data.get('message', 'Unknown error')}")
+
+
+# ── POST /auth/send-patient-otp ──────────────────────────────────────
+# Generates OTP, stores in DB, sends via MSG91. No Supabase involved.
+
+@router.post("/send-patient-otp")
+async def send_patient_otp(req: _PatientOTPSendRequest):
+    """Send a 6-digit OTP to a patient phone via MSG91."""
+    if not settings.MSG91_AUTH_KEY or not settings.MSG91_OTP_TEMPLATE_ID:
+        raise HTTPException(status_code=500, detail="MSG91 not configured on server.")
+    db = get_db()
+    otp = _generate_otp()
+    db.create_otp(phone=req.phone, otp_code=otp, ttl_minutes=settings.OTP_TTL_MINUTES)
+    await _send_via_msg91(req.phone, otp)
+    return {"message": "OTP sent successfully"}
+
+
+# ── POST /auth/verify-patient-otp ────────────────────────────────────
+# Verifies OTP from DB, auto-creates patient profile if new, returns JWT.
+
+@router.post("/verify-patient-otp")
+async def verify_patient_otp(req: _PatientOTPVerifyRequest):
+    """Verify patient OTP and return a custom JWT. Creates profile on first login."""
+    db = get_db()
+
+    if not db.verify_otp(phone=req.phone, otp_code=req.otp):
+        raise HTTPException(status_code=400, detail="Invalid or expired OTP.")
+
+    existing = db.get_profile_by_phone(req.phone)
+    is_new_user = existing is None
+
+    if is_new_user:
+        placeholder_hash = hash_password("otp_verified_no_password")
+        profile = db.create_profile(
+            phone=req.phone,
+            first_name="",
+            last_name="",
+            password_hash=placeholder_hash,
+            user_type="patient",
+        )
+        db.create_patient(profile_id=profile["id"])
+    else:
+        profile = existing
+
+    if profile.get("status", "active") != "active":
+        raise HTTPException(status_code=403, detail=f"Account is {profile['status']}.")
+
+    db.update_profile(profile["id"], {"phone_verified": True})
+    db.update_last_login(profile["id"])
+
+    token = create_token(user_id=str(profile["id"]), role="patient")
+    return {
+        "token":      token,
+        "user_id":    str(profile["id"]),
+        "user_type":  "patient",
+        "full_name":  _name(profile.get("first_name"), profile.get("last_name")),
+        "is_new_user": is_new_user,
+    }
 
 
 def _get_client_ip(request: Request) -> str:
