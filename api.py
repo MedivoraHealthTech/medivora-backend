@@ -952,7 +952,7 @@ async def upload_image_endpoint(
     )
 
 
-# ── Voice Pipeline: Gemini STT → Gemini ADK → edge-tts TTS ──────────────────
+# ── Voice Pipeline: ElevenLabs STT (Scribe v1) → Gemini ADK → ElevenLabs TTS ──────────────────
 #
 # POST /chat/voice
 # Accepts multipart/form-data:
@@ -960,7 +960,7 @@ async def upload_image_endpoint(
 #   session_id — optional existing session ID
 #
 # Returns:
-#   audio/mpeg stream (MP3 from edge-tts)
+#   audio/mpeg stream (MP3 from ElevenLabs TTS)
 #   Headers:
 #     X-Transcript  — user's transcribed text
 #     X-AI-Text     — AI text response (stripped of markdown)
@@ -974,75 +974,32 @@ _VOICE_AUDIO_MIMETYPES = {
 }
 _MAX_VOICE_BYTES = 25 * 1024 * 1024  # 25 MB max
 
-# edge-tts voices: Devanagari script → Hindi voice, otherwise Indian English
-_TTS_VOICE_HI = "hi-IN-SwaraNeural"
-_TTS_VOICE_EN = "en-IN-NeerjaNeural"
-_DEVANAGARI_RE = None  # Lazy-compiled regex
-
-
-def _get_tts_voice(text: str) -> str:
-    """Return the appropriate edge-tts voice based on script detection."""
-    global _DEVANAGARI_RE
-    import re as _re
-    if _DEVANAGARI_RE is None:
-        _DEVANAGARI_RE = _re.compile(r'[\u0900-\u097F]')
-    return _TTS_VOICE_HI if _DEVANAGARI_RE.search(text) else _TTS_VOICE_EN
-
-
-async def _edge_tts_to_bytes(text: str, voice: str) -> bytes:
-    """Generate MP3 audio bytes from text using edge-tts."""
-    import edge_tts
-    import io
-    buf = io.BytesIO()
-    communicate = edge_tts.Communicate(text, voice)
-    async for chunk in communicate.stream():
-        if chunk["type"] == "audio":
-            buf.write(chunk["data"])
-    return buf.getvalue()
-
 
 async def _tts_to_bytes(text: str) -> bytes:
-    """Generate MP3 audio bytes — ElevenLabs if configured, else edge-tts fallback.
-
-    ElevenLabs requires a paid plan for API access. When ELEVENLABS_API_KEY is set
-    and the request succeeds, it is used. On any failure (free-tier 402, network,
-    etc.) the function falls back to edge-tts transparently.
-    """
+    """Generate MP3 audio bytes using ElevenLabs TTS."""
+    import httpx as _httpx
     el_key = os.getenv("ELEVENLABS_API_KEY", "")
-    if el_key:
-        try:
-            import httpx as _httpx
-
-            voice_id = os.getenv("ELEVENLABS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM")
-            model_id = os.getenv("ELEVENLABS_MODEL_ID", "eleven_multilingual_v2")
-
-            async with _httpx.AsyncClient(timeout=15) as _el_client:
-                resp = await _el_client.post(
-                    f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}",
-                    headers={
-                        "xi-api-key": el_key,
-                        "Content-Type": "application/json",
-                        "Accept": "audio/mpeg",
-                    },
-                    json={
-                        "text": text,
-                        "model_id": model_id,
-                        "voice_settings": {"stability": 0.5, "similarity_boost": 0.75},
-                    },
-                )
-            if resp.status_code == 200:
-                return resp.content
-            logger.warning(
-                f"ElevenLabs TTS returned {resp.status_code}: {resp.text[:200]} — "
-                "falling back to edge-tts"
-            )
-        except Exception as el_err:
-            logger.warning(f"ElevenLabs TTS error: {el_err} — falling back to edge-tts")
-
-    # Fallback: edge-tts (free, always available)
-    _voice = _get_tts_voice(text)
-    return await _edge_tts_to_bytes(text, _voice)
-
+    if not el_key:
+        raise RuntimeError("ELEVENLABS_API_KEY not configured")
+    voice_id = os.getenv("ELEVENLABS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM")
+    model_id = os.getenv("ELEVENLABS_MODEL_ID", "eleven_multilingual_v2")
+    async with _httpx.AsyncClient(timeout=20) as _el_client:
+        resp = await _el_client.post(
+            f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}",
+            headers={
+                "xi-api-key": el_key,
+                "Content-Type": "application/json",
+                "Accept": "audio/mpeg",
+            },
+            json={
+                "text": text,
+                "model_id": model_id,
+                "voice_settings": {"stability": 0.5, "similarity_boost": 0.75},
+            },
+        )
+    if resp.status_code != 200:
+        raise RuntimeError(f"ElevenLabs TTS error {resp.status_code}: {resp.text[:200]}")
+    return resp.content
 
 @app.post("/chat/voice")
 @limiter.limit("20/minute")
@@ -1109,50 +1066,25 @@ async def voice_chat_endpoint(
             _audio_mime = "audio/webm"  # default — Chrome MediaRecorder output
 
         async def _run_stt_async():
-            """Transcribe via ElevenLabs Scribe v1 (~0.9s). Falls back to Gemini on failure."""
+            """Transcribe audio via ElevenLabs Scribe v1."""
             import httpx as _hx
             _el_key = os.getenv("ELEVENLABS_API_KEY", "")
-            if _el_key:
-                try:
-                    async with _hx.AsyncClient(timeout=30) as _stt_client:
-                        resp = await _stt_client.post(
-                            "https://api.elevenlabs.io/v1/speech-to-text",
-                            headers={"xi-api-key": _el_key},
-                            files={"file": (_audio_filename, audio_bytes, _audio_mime)},
-                            data={
-                                "model_id": "scribe_v1",
-                                "tag_audio_events": "false",
-                                "diarize": "false",
-                            },
-                        )
-                    if resp.status_code == 200:
-                        return resp.json().get("text", "").strip()
-                    logger.warning(f"ElevenLabs STT {resp.status_code} — falling back to Gemini STT")
-                except Exception as _stt_err:
-                    logger.warning(f"ElevenLabs STT error: {_stt_err} — falling back to Gemini STT")
-
-            # Fallback: Gemini 2.5-flash STT (thinking disabled for speed)
-            logger.info("Using Gemini STT fallback")
-            from google.genai import types as _stt_types
-            def _gemini_stt():
-                from google import genai as _stt_genai
-                _c = _stt_genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
-                return _c.models.generate_content(
-                    model="gemini-2.5-flash",
-                    contents=[
-                        _stt_types.Part.from_bytes(data=audio_bytes, mime_type=_audio_mime),
-                        _stt_types.Part.from_text(text=(
-                            "Transcribe this audio exactly as spoken. "
-                            "Output ONLY the transcribed text, nothing else. "
-                            "Preserve the original language (Hindi or English or mixed Hinglish)."
-                        )),
-                    ],
-                    config=_stt_types.GenerateContentConfig(
-                        thinking_config=_stt_types.ThinkingConfig(thinking_budget=0),
-                    ),
+            if not _el_key:
+                raise RuntimeError("ELEVENLABS_API_KEY not configured")
+            async with _hx.AsyncClient(timeout=30) as _stt_client:
+                resp = await _stt_client.post(
+                    "https://api.elevenlabs.io/v1/speech-to-text",
+                    headers={"xi-api-key": _el_key},
+                    files={"file": (_audio_filename, audio_bytes, _audio_mime)},
+                    data={
+                        "model_id": "scribe_v1",
+                        "tag_audio_events": "false",
+                        "diarize": "false",
+                    },
                 )
-            stt_resp = await _aio.to_thread(_gemini_stt)
-            return (stt_resp.text or "").strip()
+            if resp.status_code != 200:
+                raise RuntimeError(f"ElevenLabs STT error {resp.status_code}: {resp.text[:200]}")
+            return resp.json().get("text", "").strip()
 
         async def _create_session_if_new():
             if is_new:
