@@ -67,11 +67,16 @@ async def _send_via_msg91(phone: str, otp: str) -> None:
 @router.post("/send-patient-otp")
 async def send_patient_otp(req: _PatientOTPSendRequest):
     """Send a 6-digit OTP to a patient phone via MSG91."""
-    if not settings.MSG91_AUTH_KEY or not settings.MSG91_OTP_TEMPLATE_ID:
-        raise HTTPException(status_code=500, detail="MSG91 not configured on server.")
     db = get_db()
     otp = _generate_otp()
     db.create_otp(phone=req.phone, otp_code=otp, ttl_minutes=settings.OTP_TTL_MINUTES)
+
+    if settings.OTP_MOCK_MODE:
+        # Dev mode: skip SMS, return OTP in response for easy testing
+        return {"message": "OTP sent successfully (mock)", "otp": otp}
+
+    if not settings.MSG91_AUTH_KEY or not settings.MSG91_OTP_TEMPLATE_ID:
+        raise HTTPException(status_code=500, detail="MSG91 not configured on server.")
     await _send_via_msg91(req.phone, otp)
     return {"message": "OTP sent successfully"}
 
