@@ -976,30 +976,42 @@ _MAX_VOICE_BYTES = 25 * 1024 * 1024  # 25 MB max
 
 
 async def _tts_to_bytes(text: str) -> bytes:
-    """Generate MP3 audio bytes using ElevenLabs TTS."""
+    """Generate MP3 audio bytes — ElevenLabs primary, edge-tts fallback."""
     import httpx as _httpx
     el_key = os.getenv("ELEVENLABS_API_KEY", "")
-    if not el_key:
-        raise RuntimeError("ELEVENLABS_API_KEY not configured")
-    voice_id = os.getenv("ELEVENLABS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM")
-    model_id = os.getenv("ELEVENLABS_MODEL_ID", "eleven_multilingual_v2")
-    async with _httpx.AsyncClient(timeout=20) as _el_client:
-        resp = await _el_client.post(
-            f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}",
-            headers={
-                "xi-api-key": el_key,
-                "Content-Type": "application/json",
-                "Accept": "audio/mpeg",
-            },
-            json={
-                "text": text,
-                "model_id": model_id,
-                "voice_settings": {"stability": 0.5, "similarity_boost": 0.75},
-            },
-        )
-    if resp.status_code != 200:
-        raise RuntimeError(f"ElevenLabs TTS error {resp.status_code}: {resp.text[:200]}")
-    return resp.content
+    if el_key:
+        try:
+            voice_id = os.getenv("ELEVENLABS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM")
+            model_id = os.getenv("ELEVENLABS_MODEL_ID", "eleven_multilingual_v2")
+            async with _httpx.AsyncClient(timeout=20) as _el_client:
+                resp = await _el_client.post(
+                    f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}",
+                    headers={
+                        "xi-api-key": el_key,
+                        "Content-Type": "application/json",
+                        "Accept": "audio/mpeg",
+                    },
+                    json={
+                        "text": text,
+                        "model_id": model_id,
+                        "voice_settings": {"stability": 0.5, "similarity_boost": 0.75},
+                    },
+                )
+            if resp.status_code == 200:
+                return resp.content
+            logger.warning(f"ElevenLabs TTS {resp.status_code} — falling back to edge-tts")
+        except Exception as _el_err:
+            logger.warning(f"ElevenLabs TTS error: {_el_err} — falling back to edge-tts")
+
+    # Fallback: edge-tts
+    import edge_tts, io, re as _re
+    _deva = _re.compile(r'[\u0900-\u097F]')
+    _voice = "hi-IN-SwaraNeural" if _deva.search(text) else "en-IN-NeerjaNeural"
+    buf = io.BytesIO()
+    async for chunk in edge_tts.Communicate(text, _voice).stream():
+        if chunk["type"] == "audio":
+            buf.write(chunk["data"])
+    return buf.getvalue()
 
 @app.post("/chat/voice")
 @limiter.limit("20/minute")
@@ -1066,25 +1078,49 @@ async def voice_chat_endpoint(
             _audio_mime = "audio/webm"  # default — Chrome MediaRecorder output
 
         async def _run_stt_async():
-            """Transcribe audio via ElevenLabs Scribe v1."""
+            """Transcribe via ElevenLabs Scribe v1 (primary), Gemini 2.5-flash fallback."""
             import httpx as _hx
             _el_key = os.getenv("ELEVENLABS_API_KEY", "")
-            if not _el_key:
-                raise RuntimeError("ELEVENLABS_API_KEY not configured")
-            async with _hx.AsyncClient(timeout=30) as _stt_client:
-                resp = await _stt_client.post(
-                    "https://api.elevenlabs.io/v1/speech-to-text",
-                    headers={"xi-api-key": _el_key},
-                    files={"file": (_audio_filename, audio_bytes, _audio_mime)},
-                    data={
-                        "model_id": "scribe_v1",
-                        "tag_audio_events": "false",
-                        "diarize": "false",
-                    },
+            if _el_key:
+                try:
+                    async with _hx.AsyncClient(timeout=30) as _stt_client:
+                        resp = await _stt_client.post(
+                            "https://api.elevenlabs.io/v1/speech-to-text",
+                            headers={"xi-api-key": _el_key},
+                            files={"file": (_audio_filename, audio_bytes, _audio_mime)},
+                            data={
+                                "model_id": "scribe_v1",
+                                "tag_audio_events": "false",
+                                "diarize": "false",
+                            },
+                        )
+                    if resp.status_code == 200:
+                        return resp.json().get("text", "").strip()
+                    logger.warning(f"ElevenLabs STT {resp.status_code} — falling back to Gemini STT")
+                except Exception as _stt_err:
+                    logger.warning(f"ElevenLabs STT error: {_stt_err} — falling back to Gemini STT")
+
+            # Fallback: Gemini 2.5-flash STT
+            from google.genai import types as _stt_types
+            def _gemini_stt():
+                from google import genai as _stt_genai
+                _c = _stt_genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
+                return _c.models.generate_content(
+                    model="gemini-2.5-flash",
+                    contents=[
+                        _stt_types.Part.from_bytes(data=audio_bytes, mime_type=_audio_mime),
+                        _stt_types.Part.from_text(text=(
+                            "Transcribe this audio exactly as spoken. "
+                            "Output ONLY the transcribed text, nothing else. "
+                            "Preserve the original language (Hindi or English or mixed Hinglish)."
+                        )),
+                    ],
+                    config=_stt_types.GenerateContentConfig(
+                        thinking_config=_stt_types.ThinkingConfig(thinking_budget=0),
+                    ),
                 )
-            if resp.status_code != 200:
-                raise RuntimeError(f"ElevenLabs STT error {resp.status_code}: {resp.text[:200]}")
-            return resp.json().get("text", "").strip()
+            stt_resp = await _aio.to_thread(_gemini_stt)
+            return (stt_resp.text or "").strip()
 
         async def _create_session_if_new():
             if is_new:
