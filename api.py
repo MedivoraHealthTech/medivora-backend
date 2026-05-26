@@ -293,6 +293,31 @@ async def validate_upload_file(file: UploadFile) -> UploadFile:
         )
 
 # Retry-wrapped ADK runner for transient Gemini API failures
+_HINGLISH_WORDS = {
+    "hai", "hain", "hua", "hue", "hogi", "hoga", "ho", "kar", "karo", "karna",
+    "mujhe", "meri", "mera", "mere", "mein", "main", "mai", "aur", "ya", "nahi",
+    "nhi", "kya", "kuch", "koi", "kal", "aaj", "abhi", "bahut", "thoda", "zyada",
+    "accha", "theek", "theek", "bhi", "toh", "to", "se", "pe", "par", "ko",
+    "ka", "ki", "ke", "ek", "do", "din", "raat", "sar", "sir", "dard", "pet",
+    "bukhar", "khana", "pani", "dawai", "doctor", "matlab", "samajh", "bata",
+    "batao", "lagta", "laga", "tha", "thi", "the", "rahega", "raha", "rahi",
+    "suniye", "suno", "please", "ji", "haan", "haa", "na", "woh", "wo", "yeh",
+    "ye", "unhe", "inhe", "apna", "apni", "apne", "jab", "tab", "kyun", "kaise",
+}
+
+def _detect_language_directive(text: str) -> str:
+    """Return an explicit language directive to prepend to the user message."""
+    if not text:
+        return ""
+    # Devanagari Unicode block: U+0900–U+097F
+    if any('ऀ' <= ch <= 'ॿ' for ch in text):
+        return "[LANGUAGE DIRECTIVE: The patient is writing in Devanagari Hindi. Reply ONLY in Devanagari Hindi. Medical terms may stay in English.]"
+    words = set(text.lower().split())
+    if words & _HINGLISH_WORDS:
+        return "[LANGUAGE DIRECTIVE: The patient is writing in Hinglish. Reply in Hinglish — mix Hindi words (Roman script) with English naturally. Do NOT reply in pure English or pure Devanagari.]"
+    return "[LANGUAGE DIRECTIVE: The patient is writing in English. Reply in ENGLISH ONLY. Do not use any Hindi or Hinglish words.]"
+
+
 @retry(
     stop=stop_after_attempt(3),
     wait=wait_exponential(multiplier=1, min=1, max=8),
@@ -630,6 +655,11 @@ async def chat_endpoint(
         if _image_ctx:
             adapted_message = f"{_image_ctx}\n\n{adapted_message}"
             logger.info(f"Image context injected into chat turn: session={current_session_id}")
+
+        # Prepend per-message language directive so Gemini reliably mirrors the patient
+        lang_directive = _detect_language_directive(chat_request.message)
+        if lang_directive:
+            adapted_message = f"{lang_directive}\n\n{adapted_message}"
 
         # Build ADK user message
         content = genai_types.Content(
@@ -1260,6 +1290,11 @@ async def voice_chat_endpoint(
 
     # ── 3b. Run through the same ADK agent pipeline as /chat ────────────────
     msg_count = get_message_count(current_session_id)
+
+    # Prepend per-message language directive (same as text /chat)
+    lang_directive = _detect_language_directive(transcript)
+    if lang_directive:
+        adapted_message = f"{lang_directive}\n\n{adapted_message}"
 
     content = genai_types.Content(
         role="user",
