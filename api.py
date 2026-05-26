@@ -1177,13 +1177,24 @@ async def voice_chat_endpoint(
                 _active_sessions.add(current_session_id)
 
         async def _fetch_patient_context():
-            """Fetch patient_id + full context in one chained call — runs parallel with STT."""
+            """Fetch patient_id + context, runs parallel with STT. Uses P2 cache."""
             if not (user_id and memory_svc):
                 return None, {"facts": {}, "recent_summaries": []}
-            pid = await memory_svc.get_patient_id(user_id)
+            # P2: cache patient_id (immutable)
+            pid = _patient_id_cache.get(user_id)
+            if not pid:
+                pid = await memory_svc.get_patient_id(user_id)
+                if pid:
+                    _patient_id_cache[user_id] = pid
             if not pid:
                 return None, {"facts": {}, "recent_summaries": []}
+            # P2: skip DB + embedding on follow-up turns within same session
+            ctx_key = f"{pid}:{current_session_id}"
+            if not is_new and ctx_key in _patient_context_cache:
+                return pid, _patient_context_cache[ctx_key]
+            # transcript not yet available (parallel with STT) — use recency retrieval
             ctx = await memory_svc.get_patient_context(pid, query_text=None)
+            _patient_context_cache[ctx_key] = ctx
             return pid, ctx
 
         transcript, _, (patient_id, patient_context) = await _aio.gather(
@@ -1453,11 +1464,13 @@ async def voice_chat_endpoint(
 
     headers = {
         "X-Transcript":           _safe_header(transcript),
-        "X-AI-Text":              _safe_header(final_response),
+        # Medical reports need the full text so the triage card renders completely.
+        # Regular turns stay at 500 chars (only audio matters, text isn't shown).
+        "X-AI-Text":              _safe_header(final_response, max_len=4000 if _v_is_medical_report else 500),
         "X-Session-Id":           current_session_id,
         "X-Is-Medical-Report":    "true" if _v_is_medical_report else "false",
         "X-Is-Book-Appointment":  "true" if _v_is_book_appointment else "false",
-        "X-Triage":               _safe_header(_json_v.dumps(_v_triage)) if _v_triage else "",
+        "X-Triage":               _safe_header(_json_v.dumps(_v_triage), max_len=2000) if _v_triage else "",
         "X-Specialty":            _v_specialty or "",
         "Access-Control-Expose-Headers": (
             "X-Transcript, X-AI-Text, X-Session-Id, "
