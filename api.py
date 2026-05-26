@@ -428,6 +428,32 @@ async def _bg_persist_voice_turn(
     await db.touch_chat_session(session_id)
 
 
+async def _bg_persist_chat_turn(
+    session_id: str, uid: str, new_session: bool,
+    msg: str, resp: str, raw_resp: str,
+    safety_res, pid, mem_svc, session_summary: str,
+):
+    """Background task: all DB + memory work after a text chat turn. Non-blocking for the response."""
+    db = DatabaseManager()
+    if new_session:
+        title = await _generate_session_title(msg, resp)
+        await db.create_chat_session(session_id, uid, title)
+    else:
+        await _maybe_update_session_title(db, session_id, msg, resp)
+    await db.save_chat_message(session_id, uid, "ai", resp)
+    if safety_res.events and pid:
+        await log_safety_events(db, safety_res, session_id, pid, raw_resp)
+    if mem_svc and pid:
+        await mem_svc.extract_and_store_facts(pid, session_id, f"Patient: {msg}\n\nAI: {resp}")
+        if "📋" in resp and "assessment" in resp.lower():
+            outcome = (
+                "emergency" if safety_res.has_emergency else
+                ("consultation_booked" if "book an appointment" in resp.lower() else "prescription_pending")
+            )
+            await mem_svc.save_session_summary(pid, session_id, session_summary or resp, outcome)
+    await db.touch_chat_session(session_id)
+
+
 async def _generate_session_title(message: str, ai_response: str = "") -> str:
     """Use Gemini to generate a short medical condition noun/phrase for the chat title.
     Uses the patient message + optionally the AI response for better context."""
@@ -437,23 +463,32 @@ async def _generate_session_title(message: str, ai_response: str = "") -> str:
 
     try:
         from google import genai
+        from google.genai import types as _gt
         client = genai.Client()
 
-        # Build context — use AI response too if available (helps when user says "hi" then describes symptoms)
         context = f'Patient: "{message[:300]}"'
         if ai_response:
             context += f'\nAI response: "{ai_response[:300]}"'
 
-        response = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=(
-                f'From this medical chat, extract a short condition/topic noun (2-4 words max). '
-                f'Return ONLY the noun phrase, nothing else. '
-                f'If the conversation is just greetings with no medical topic yet, return exactly "New Consultation".\n'
-                f'Examples of good titles: "Headache", "Lower Back Pain", "Anxiety & Stress", "Skin Rash", "Fever & Cold", "Chest Pain", "Pregnancy Query"\n\n'
-                f'{context}'
-            ),
+        prompt = (
+            f'From this medical chat, extract a short condition/topic noun (2-4 words max). '
+            f'Return ONLY the noun phrase, nothing else. '
+            f'If the conversation is just greetings with no medical topic yet, return exactly "New Consultation".\n'
+            f'Examples of good titles: "Headache", "Lower Back Pain", "Anxiety & Stress", "Skin Rash", "Fever & Cold", "Chest Pain", "Pregnancy Query"\n\n'
+            f'{context}'
         )
+
+        def _call():
+            return client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=prompt,
+                config=_gt.GenerateContentConfig(
+                    thinking_config=_gt.ThinkingConfig(thinking_budget=0),
+                    max_output_tokens=20,
+                ),
+            )
+
+        response = await asyncio.to_thread(_call)
         title = response.text.strip().strip('"').strip("'").strip()
         if title and len(title) <= 60:
             return title
@@ -557,14 +592,6 @@ async def chat_endpoint(
         current_session_id = session_id or str(uuid.uuid4())
         is_new = current_session_id not in _active_sessions
 
-        if is_new:
-            await adk_session_service.create_session(
-                app_name=APP_NAME,
-                user_id=USER_ID,
-                session_id=current_session_id,
-            )
-            _active_sessions.add(current_session_id)
-
         # Set user context for agent tools (id + name + email from JWT)
         set_current_user(
             user_id or "",
@@ -577,15 +604,37 @@ async def chat_endpoint(
         db_for_memory = DatabaseManager() if user_id else None
         memory_svc    = MemoryService(db_for_memory) if db_for_memory else None
 
-        # Fetch patient memory (authenticated users only)
-        patient_id      = None
-        patient_context = {"facts": {}, "recent_summaries": []}
-        if user_id and memory_svc:
-            patient_id = await memory_svc.get_patient_id(user_id)
-            if patient_id:
-                patient_context = await memory_svc.get_patient_context(
-                    patient_id, query_text=chat_request.message
+        # P3: Parallelize ADK session creation + patient memory fetch
+        async def _create_adk_session():
+            if is_new:
+                await adk_session_service.create_session(
+                    app_name=APP_NAME, user_id=USER_ID, session_id=current_session_id,
                 )
+                _active_sessions.add(current_session_id)
+
+        async def _fetch_patient_memory():
+            if not (user_id and memory_svc):
+                return None, {"facts": {}, "recent_summaries": []}
+            # P2: Cache patient_id lookup (immutable — profile → patient mapping never changes)
+            pid = _patient_id_cache.get(user_id)
+            if not pid:
+                pid = await memory_svc.get_patient_id(user_id)
+                if pid:
+                    _patient_id_cache[user_id] = pid
+            if not pid:
+                return None, {"facts": {}, "recent_summaries": []}
+            # P2: Cache patient context per session — skip embedding on follow-up turns
+            ctx_key = f"{pid}:{current_session_id}"
+            if not is_new and ctx_key in _patient_context_cache:
+                return pid, _patient_context_cache[ctx_key]
+            ctx = await memory_svc.get_patient_context(pid, query_text=chat_request.message)
+            _patient_context_cache[ctx_key] = ctx
+            return pid, ctx
+
+        _, (patient_id, patient_context) = await asyncio.gather(
+            _create_adk_session(),
+            _fetch_patient_memory(),
+        )
 
         triage_result = _triage_engine.score(chat_request.message, patient_context)
 
@@ -594,7 +643,10 @@ async def chat_endpoint(
             logger.warning(f"HARD EMERGENCY detected: session={current_session_id}, score={triage_result.risk_score}")
             emergency_resp = triage_result.emergency_response
             if user_id and db_for_memory:
-                await db_for_memory.save_chat_message(current_session_id, user_id, "ai", emergency_resp)
+                background_tasks.add_task(
+                    db_for_memory.save_chat_message,
+                    current_session_id, user_id, "ai", emergency_resp,
+                )
             return ChatResponse(
                 response=emergency_resp,
                 status="emergency",
@@ -702,58 +754,14 @@ async def chat_endpoint(
         if msg_count % 5 == 0:
             final_response += "\n\n_Just a reminder — everything you share here is completely private and stays between us._ 💙"
 
-        # Persist session metadata (keywords + AI recommendation only — no full message history)
+        # P1: All DB + memory work runs in background — response is returned immediately
         if user_id:
-            db = DatabaseManager()
-
-            # ── Session keyword title (chief complaint / medical topic) ──────────
-            if is_new:
-                title = await _generate_session_title(message, final_response)
-                await db.create_chat_session(current_session_id, user_id, title)
-            else:
-                # Update title once we have richer medical context
-                await _maybe_update_session_title(db, current_session_id, message, final_response)
-
-            # ── Save AI recommendation only (skip verbatim user messages) ───────
-            await db.save_chat_message(current_session_id, user_id, "ai", final_response)
-
-            # ── Phase 1 & 5 background tasks ──────────────────────────────────
-            # Safety event logging
-            if safety_result.events and patient_id:
-                background_tasks.add_task(
-                    log_safety_events, db, safety_result,
-                    current_session_id, patient_id, raw_response,
-                )
-
-            # Memory: extract facts + save summary when triage report is complete
-            if memory_svc and patient_id:
-                # Extract structured facts from every exchange (lightweight)
-                background_tasks.add_task(
-                    memory_svc.extract_and_store_facts,
-                    patient_id,
-                    current_session_id,
-                    f"Patient: {message}\n\nAI: {final_response}",
-                )
-                # Session summary only when full triage report is shown
-                is_medical_report_turn = (
-                    "📋" in final_response and
-                    "assessment" in final_response.lower()
-                )
-                if is_medical_report_turn:
-                    outcome = "emergency" if safety_result.has_emergency else (
-                        "consultation_booked" if "book an appointment" in final_response.lower() else
-                        "prescription_pending"
-                    )
-                    background_tasks.add_task(
-                        memory_svc.save_session_summary,
-                        patient_id,
-                        current_session_id,
-                        _session_summary or final_response,
-                        outcome,
-                    )
-
-            # Touch session updated_at
-            await db.touch_chat_session(current_session_id)
+            background_tasks.add_task(
+                _bg_persist_chat_turn,
+                current_session_id, user_id, is_new,
+                message, final_response, raw_response,
+                safety_result, patient_id, memory_svc, _session_summary,
+            )
 
         status = "session_started" if is_new else "message_processed"
 
@@ -855,6 +863,13 @@ async def chat_endpoint(
 # This avoids any DB round-trip on the hot chat path while guaranteeing the
 # image context is always available when the patient sends their next message.
 _pending_image_contexts: Dict[str, str] = {}
+
+# Per-session patient context cache — avoids repeating the ~1.5s
+# text-embedding-004 API call on every follow-up turn within a session.
+# _patient_id_cache:      user_id (profile UUID) → patients.id
+# _patient_context_cache: "{patient_id}:{session_id}" → context dict
+_patient_id_cache: Dict[str, str] = {}
+_patient_context_cache: Dict[str, dict] = {}
 
 _ALLOWED_IMAGE_MIMETYPES = {
     "image/jpeg", "image/jpg", "image/png",
