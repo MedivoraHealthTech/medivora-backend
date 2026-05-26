@@ -49,6 +49,7 @@ class Settings:
     MSG91_AUTH_KEY: str = os.getenv("MSG91_AUTH_KEY", "")
     MSG91_SENDER_ID: str = os.getenv("MSG91_SENDER_ID", "")
     MSG91_OTP_TEMPLATE_ID: str = os.getenv("MSG91_OTP_TEMPLATE_ID", "")
+    MSG91_DLT_TEMPLATE_ID: str = os.getenv("MSG91_DLT_TEMPLATE_ID", "")
 
     # Razorpay
     RAZORPAY_KEY_ID: str = os.getenv("RAZORPAY_KEY_ID", "")

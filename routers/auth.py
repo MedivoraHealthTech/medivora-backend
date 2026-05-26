@@ -44,10 +44,11 @@ async def _send_via_msg91_flow(phone: str, otp: str) -> None:
     """Send OTP via MSG91 Flow (SMS) API. Passes OTP into the DLT-registered SMS template."""
     mobile = phone.lstrip("+")  # MSG91 expects no leading +
     payload = {
-        "flow_id": settings.MSG91_OTP_TEMPLATE_ID,
-        "sender":  settings.MSG91_SENDER_ID,
-        "mobiles": mobile,
-        "OTP":     otp,
+        "flow_id":    settings.MSG91_OTP_TEMPLATE_ID,
+        "sender":     settings.MSG91_SENDER_ID,
+        "mobiles":    mobile,
+        "OTP":        otp,
+        "DLT_TE_ID":  settings.MSG91_DLT_TEMPLATE_ID,
     }
     async with httpx.AsyncClient(timeout=10) as client:
         resp = await client.post(
