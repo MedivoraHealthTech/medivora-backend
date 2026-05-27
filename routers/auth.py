@@ -40,12 +40,16 @@ class VerifyPatientOTPRequest(BaseModel):
 @router.post("/send-patient-otp")
 async def send_patient_otp(req: SendPatientOTPRequest):
     """Send Supabase phone OTP — proxied server-side to bypass browser CORS."""
+    # Use anon key if set, fall back to service key — both are valid for /auth/v1/otp
+    apikey = settings.SUPABASE_ANON_KEY or settings.SUPABASE_KEY
+    if not apikey:
+        raise HTTPException(status_code=500, detail="Supabase API key not configured")
     async with httpx.AsyncClient(timeout=15) as client:
         resp = await client.post(
             f"{settings.SUPABASE_URL}/auth/v1/otp",
             json={"phone": req.phone},
             headers={
-                "apikey": settings.SUPABASE_ANON_KEY,
+                "apikey": apikey,
                 "Content-Type": "application/json",
             },
         )
@@ -62,12 +66,15 @@ async def send_patient_otp(req: SendPatientOTPRequest):
 @router.post("/verify-patient-otp")
 async def verify_patient_otp(req: VerifyPatientOTPRequest):
     """Verify Supabase phone OTP — returns access_token + refresh_token for client-side session."""
+    apikey = settings.SUPABASE_ANON_KEY or settings.SUPABASE_KEY
+    if not apikey:
+        raise HTTPException(status_code=500, detail="Supabase API key not configured")
     async with httpx.AsyncClient(timeout=15) as client:
         resp = await client.post(
             f"{settings.SUPABASE_URL}/auth/v1/verify",
             json={"phone": req.phone, "token": req.otp, "type": "sms"},
             headers={
-                "apikey": settings.SUPABASE_ANON_KEY,
+                "apikey": apikey,
                 "Content-Type": "application/json",
             },
         )
