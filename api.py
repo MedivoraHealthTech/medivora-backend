@@ -526,7 +526,24 @@ async def _maybe_update_session_title(db, session_id: str, message: str, ai_resp
         logger.warning(f"_maybe_update_session_title failed: {e}")
 
 
+def _strip_internal_notes(text: str) -> str:
+    """Remove internal model meta-blocks that leak into patient-facing responses.
+
+    The language directive and system-note blocks are injected into the user
+    message so the model knows which language to use. Occasionally the model
+    echoes them back verbatim in its output. They must never appear in the
+    response the patient sees.
+    """
+    import re as _re
+    # Remove [SYSTEM NOTE: ...] and [LANGUAGE DIRECTIVE: ...] blocks (single or multi-line)
+    text = _re.sub(r'\[SYSTEM NOTE:[^\]]*\]\s*', '', text)
+    text = _re.sub(r'\[LANGUAGE DIRECTIVE:[^\]]*\]\s*', '', text)
+    text = _re.sub(r'\[PATIENT CONTEXT\].*?\[END PATIENT CONTEXT\]\s*', '', text, flags=_re.DOTALL)
+    return text.strip()
+
+
 def soften_response(text: str) -> str:
+    text = _strip_internal_notes(text)
     replacements = {
         "You should": "You might consider",
         "You must": "It could really help to",
