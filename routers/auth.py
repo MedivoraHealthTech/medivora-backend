@@ -5,7 +5,9 @@ Auth Router — Signup, Login, OTP endpoints.
 import random
 import string
 
+import httpx
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
+from pydantic import BaseModel
 
 from auth.dependencies import get_current_user
 from auth.jwt_handler import create_token
@@ -21,6 +23,65 @@ from schemas.auth import (
 )
 
 router = APIRouter(prefix="/auth", tags=["auth"])
+
+
+class SendPatientOTPRequest(BaseModel):
+    phone: str
+
+
+class VerifyPatientOTPRequest(BaseModel):
+    phone: str
+    otp: str
+
+
+# ── POST /auth/send-patient-otp ──────────────────────────────────────
+# Proxies Supabase phone OTP request server-side to avoid browser CORS issues.
+
+@router.post("/send-patient-otp")
+async def send_patient_otp(req: SendPatientOTPRequest):
+    """Send Supabase phone OTP — proxied server-side to bypass browser CORS."""
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.post(
+            f"{settings.SUPABASE_URL}/auth/v1/otp",
+            json={"phone": req.phone},
+            headers={
+                "apikey": settings.SUPABASE_ANON_KEY,
+                "Content-Type": "application/json",
+            },
+        )
+    if not resp.is_success:
+        data = resp.json() if resp.content else {}
+        detail = data.get("msg") or data.get("error_description") or data.get("message") or "Failed to send OTP"
+        raise HTTPException(status_code=resp.status_code, detail=detail)
+    return {"message": "OTP sent successfully"}
+
+
+# ── POST /auth/verify-patient-otp ────────────────────────────────────
+# Verifies Supabase phone OTP server-side and returns Supabase session tokens.
+
+@router.post("/verify-patient-otp")
+async def verify_patient_otp(req: VerifyPatientOTPRequest):
+    """Verify Supabase phone OTP — returns access_token + refresh_token for client-side session."""
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.post(
+            f"{settings.SUPABASE_URL}/auth/v1/verify",
+            json={"phone": req.phone, "token": req.otp, "type": "sms"},
+            headers={
+                "apikey": settings.SUPABASE_ANON_KEY,
+                "Content-Type": "application/json",
+            },
+        )
+    if not resp.is_success:
+        data = resp.json() if resp.content else {}
+        detail = data.get("msg") or data.get("error_description") or data.get("message") or "Invalid or expired OTP"
+        raise HTTPException(status_code=resp.status_code, detail=detail)
+    data = resp.json()
+    return {
+        "access_token": data.get("access_token"),
+        "refresh_token": data.get("refresh_token"),
+        "token_type": data.get("token_type", "bearer"),
+        "user": data.get("user"),
+    }
 
 
 def _generate_otp(length: int = 6) -> str:
@@ -156,21 +217,29 @@ async def send_otp(req: SendOTPRequest):
             "note": "Mock mode — OTP returned in response for development",
         }
 
-    # Production — send via Twilio
-    if not settings.TWILIO_ACCOUNT_SID or not settings.TWILIO_AUTH_TOKEN or not settings.TWILIO_FROM_NUMBER:
+    # Production — send via MSG91
+    if not settings.MSG91_AUTH_KEY or not settings.MSG91_OTP_TEMPLATE_ID:
         raise HTTPException(
             status_code=500,
-            detail="SMS service not configured. Set TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, and TWILIO_FROM_NUMBER.",
+            detail="SMS service not configured. Set MSG91_AUTH_KEY and MSG91_OTP_TEMPLATE_ID.",
         )
 
     try:
-        from twilio.rest import Client as TwilioClient
-        client = TwilioClient(settings.TWILIO_ACCOUNT_SID, settings.TWILIO_AUTH_TOKEN)
-        client.messages.create(
-            body=f"Your Medivora OTP is: {otp}. Valid for {settings.OTP_TTL_MINUTES} minute. Do not share this code.",
-            from_=settings.TWILIO_FROM_NUMBER,
-            to=req.phone,
+        import httpx
+        payload = {
+            "flow_id": settings.MSG91_OTP_TEMPLATE_ID,
+            "sender": settings.MSG91_SENDER_ID,
+            "mobiles": req.phone,
+            "OTP": otp,
+        }
+        resp = httpx.post(
+            "https://control.msg91.com/api/v5/flow/",
+            json=payload,
+            headers={"authkey": settings.MSG91_AUTH_KEY, "Content-Type": "application/json"},
+            timeout=10,
         )
+        if resp.status_code != 200:
+            raise Exception(f"MSG91 returned {resp.status_code}: {resp.text}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to send OTP via SMS: {str(e)}")
 

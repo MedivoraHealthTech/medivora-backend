@@ -266,13 +266,24 @@ def assess_risk(symptoms_text: str) -> dict:
             }
 
     # ── General EMERGENCY flags ──
+    # NOTE: 'chest pain' alone is NOT an emergency — it's URGENT.
+    # Only clear-cut life-threatening presentations trigger EMERGENCY.
     emergency_keywords = [
-        'chest pain', 'difficulty breathing', 'unconscious', 'severe bleeding',
-        'heart attack', 'stroke', 'seizure', 'poisoning',
+        'heart attack', 'cardiac arrest', 'crushing chest',
+        'difficulty breathing', 'cannot breathe', 'stopped breathing',
+        'unconscious', 'not responding',
+        'severe bleeding', 'stroke',
+        'seizure', 'convulsion', 'poisoning', 'overdose',
+        'anaphylaxis', 'throat swelling',
     ]
     if any(kw in text_lower for kw in emergency_keywords):
         _write_triage_from_risk("EMERGENCY")
         return {"status": "success", "risk_level": "EMERGENCY", "action": "Call 108 immediately"}
+
+    # ── Chest pain alone → URGENT (needs assessment, not instant 108) ──
+    if 'chest pain' in text_lower or 'chest tightness' in text_lower:
+        _write_triage_from_risk("URGENT")
+        return {"status": "success", "risk_level": "URGENT", "action": "See cardiologist urgently — assess severity first"}
 
     # ── General URGENT flags ──
     urgent_keywords = ['high fever', 'blood', 'severe', 'breathing']
@@ -419,6 +430,15 @@ def determine_specialty(symptoms_text: str, diagnosis: str = "") -> dict:
         "reason": f"Matched {best_specialty} based on symptom/diagnosis keywords",
         "all_matches": {k: v for k, v in sorted(scores.items(), key=lambda x: -x[1])},
     }
+
+
+def assess_and_route(symptoms_text: str, diagnosis: str = "") -> dict:
+    """Combined risk assessment + specialty determination in a single call.
+    Replaces calling assess_risk and determine_specialty separately — saves one API round-trip.
+    Returns risk_level, action, specialty, and confidence in one response."""
+    risk = assess_risk(symptoms_text)
+    specialty = determine_specialty(symptoms_text, diagnosis)
+    return {**risk, **specialty}
 
 
 def get_nearby_facilities(location: str, risk_level: str) -> dict:
@@ -628,6 +648,7 @@ def save_patient_to_db(name: str, age: int, phone: str = "", gender: str = "unkn
     """Save a patient to the database and return patient_id."""
     try:
         from models import PatientProfile
+        import threading as _threading
         patient_id = f"patient_{uuid.uuid4().hex[:10]}"
         now = datetime.now()
         patient = PatientProfile(
@@ -635,7 +656,8 @@ def save_patient_to_db(name: str, age: int, phone: str = "", gender: str = "unkn
             address="", medical_history=[], allergies=[], current_medications=[],
             emergency_contact="", created_at=now, updated_at=now,
         )
-        _run_async(_db.save_patient(patient))
+        # Fire-and-forget — patient_id is already generated; no need to block on the write
+        _threading.Thread(target=lambda: _run_async(_db.save_patient(patient)), daemon=True).start()
         return {"status": "success", "patient_id": patient_id, "name": name}
     except Exception as e:
         logger.error(f"save_patient_to_db failed: {e}")
@@ -643,14 +665,14 @@ def save_patient_to_db(name: str, age: int, phone: str = "", gender: str = "unkn
 
 
 def _send_external_notification(doctors: list, approval_id: str, patient_name: str, symptoms: str, risk_level: str, specialty: str):
-    """Send SMS/WhatsApp alerts to doctors for URGENT/EMERGENCY cases.
-    Integrates with Twilio / WhatsApp Business API when configured.
+    """Send SMS alerts to doctors for URGENT/EMERGENCY cases.
+    Integrates with MSG91 when configured.
     Falls back to logging when credentials are not set."""
     import os
-    twilio_sid = os.getenv("TWILIO_ACCOUNT_SID", "")
-    twilio_token = os.getenv("TWILIO_AUTH_TOKEN", "")
-    twilio_from = os.getenv("TWILIO_FROM_NUMBER", "")
-    whatsapp_from = os.getenv("TWILIO_WHATSAPP_FROM", "")  # e.g. "whatsapp:+14155238886"
+    import httpx
+    msg91_auth_key = os.getenv("MSG91_AUTH_KEY", "")
+    msg91_sender_id = os.getenv("MSG91_SENDER_ID", "MEDVRA")
+    msg91_alert_template_id = os.getenv("MSG91_ALERT_TEMPLATE_ID", "")
 
     emoji = "🚨" if risk_level == "EMERGENCY" else "⚠️"
     msg_body = (
@@ -662,38 +684,36 @@ def _send_external_notification(doctors: list, approval_id: str, patient_name: s
         f"Please review on your Medivora Doctor Dashboard immediately."
     )
 
-    if twilio_sid and twilio_token:
-        try:
-            from twilio.rest import Client
-            client = Client(twilio_sid, twilio_token)
-            for doc in doctors[:3]:  # Notify up to 3 doctors
-                phone = doc.get("phone", "")
-                if not phone:
-                    continue
-                # WhatsApp notification (preferred)
-                if whatsapp_from:
-                    try:
-                        client.messages.create(
-                            body=msg_body,
-                            from_=whatsapp_from,
-                            to=f"whatsapp:{phone}" if not phone.startswith("whatsapp:") else phone,
-                        )
-                        logger.info(f"WhatsApp alert sent to doctor {doc.get('id')} for {approval_id}")
-                    except Exception as we:
-                        logger.warning(f"WhatsApp notification failed for {doc.get('id')}: {we}")
-                # SMS fallback
-                if twilio_from:
-                    try:
-                        client.messages.create(body=msg_body, from_=twilio_from, to=phone)
-                        logger.info(f"SMS alert sent to doctor {doc.get('id')} for {approval_id}")
-                    except Exception as se:
-                        logger.warning(f"SMS notification failed for {doc.get('id')}: {se}")
-        except ImportError:
-            logger.warning("Twilio SDK not installed. Set 'pip install twilio' for SMS/WhatsApp notifications.")
-        except Exception as e:
-            logger.error(f"External notification error: {e}")
+    if msg91_auth_key and msg91_alert_template_id:
+        for doc in doctors[:3]:  # Notify up to 3 doctors
+            phone = doc.get("phone", "")
+            if not phone:
+                continue
+            try:
+                payload = {
+                    "flow_id": msg91_alert_template_id,
+                    "sender": msg91_sender_id,
+                    "mobiles": phone,
+                    "RISK": risk_level,
+                    "PATIENT": patient_name or "Anonymous",
+                    "SYMPTOMS": symptoms[:80],
+                    "SPECIALTY": specialty,
+                    "APPROVAL": approval_id,
+                }
+                resp = httpx.post(
+                    "https://control.msg91.com/api/v5/flow/",
+                    json=payload,
+                    headers={"authkey": msg91_auth_key, "Content-Type": "application/json"},
+                    timeout=10,
+                )
+                if resp.status_code == 200:
+                    logger.info(f"SMS alert sent to doctor {doc.get('id')} for {approval_id}")
+                else:
+                    logger.warning(f"MSG91 SMS failed for doctor {doc.get('id')}: {resp.status_code} {resp.text}")
+            except Exception as e:
+                logger.warning(f"SMS notification failed for {doc.get('id')}: {e}")
     else:
-        logger.info(f"External notification skipped (Twilio not configured). {risk_level} alert for {approval_id}: {msg_body[:80]}")
+        logger.info(f"External notification skipped (MSG91 not configured). {risk_level} alert for {approval_id}: {msg_body[:80]}")
 
 
 def create_approval_and_notify(
@@ -859,37 +879,45 @@ def create_approval_and_notify(
             "priority": priority,
             "created_at": datetime.now().isoformat(),
         }
-        _run_async(_db.save_approval_request(approval_request))
-
-        # Save anonymous patient so JOIN works
-        from models import PatientProfile
-        now = datetime.now()
-        anon = PatientProfile(
-            id=patient_id, name=patient_name or "Anonymous User", age=25,
-            gender="unknown", phone="", address="", medical_history=[],
-            allergies=[], current_medications=[], emergency_contact="",
-            created_at=now, updated_at=now,
-        )
-        try:
-            _run_async(_db.save_patient(anon))
-        except Exception:
-            pass
-
-        # Notify doctors matching the determined specialty
+        # Fetch doctors synchronously — we need the count for the return value
+        # and must fire notifications before this function returns.
         doctors = _run_async(_db.get_available_doctors(determined_specialty))
         notif_msg = f"Naya prescription approval ({determined_specialty}): {patient_name or 'Anonymous'}, Symptoms: {symptoms[:80]}, Risk: {risk_level}"
 
-        if doctors:
-            _run_async(_db.assign_doctor_to_approval(approval_id, doctors[0]["id"]))
-            for doc in doctors:
+        import threading as _threading
+        from models import PatientProfile as _PP
+
+        def _bg_writes():
+            """Fire-and-forget: save approval + patient + notifications in background."""
+            try:
+                _run_async(_db.save_approval_request(approval_request))
+            except Exception:
+                pass
+            try:
+                now2 = datetime.now()
+                anon = _PP(
+                    id=patient_id, name=patient_name or "Anonymous User", age=25,
+                    gender="unknown", phone="", address="", medical_history=[],
+                    allergies=[], current_medications=[], emergency_contact="",
+                    created_at=now2, updated_at=now2,
+                )
+                _run_async(_db.save_patient(anon))
+            except Exception:
+                pass
+            if doctors:
                 try:
-                    _run_async(_db.save_notification(doc["id"], approval_id, notif_msg, priority))
+                    _run_async(_db.assign_doctor_to_approval(approval_id, doctors[0]["id"]))
                 except Exception:
                     pass
+                for doc in doctors:
+                    try:
+                        _run_async(_db.save_notification(doc["id"], approval_id, notif_msg, priority))
+                    except Exception:
+                        pass
+                if risk_level in ("EMERGENCY", "URGENT"):
+                    _send_external_notification(doctors, approval_id, patient_name, symptoms, risk_level, determined_specialty)
 
-            # ── External notification for URGENT/EMERGENCY cases ──
-            if risk_level in ("EMERGENCY", "URGENT"):
-                _send_external_notification(doctors, approval_id, patient_name, symptoms, risk_level, determined_specialty)
+        _threading.Thread(target=_bg_writes, daemon=True).start()
 
         result = {
             "status": "success",

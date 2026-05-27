@@ -35,10 +35,23 @@ from auth import (
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.genai import types as genai_types
-from medivora_agent import root_agent
+from medivora_agent import root_agent, voice_agent
 from medivora_agent.tools import set_current_user_id, set_current_user
 from pdf_generator import generate_prescription_pdf, compute_signature_hash
 from drug_blacklist import seed_default_blacklist
+
+# Memory-driven healthcare modules (Phase 1–5)
+from services.memory import MemoryService
+from services.emotional import EmotionalContextBuilder
+from services.triage import TriageEngine
+from services.safety import SafetyValidator, log_safety_events
+from services.context_builder import ContextBuilder
+from services.vision import get_vision_service
+
+_triage_engine    = TriageEngine()
+_emotional_builder = EmotionalContextBuilder()
+_safety_validator  = SafetyValidator()
+_context_builder   = ContextBuilder()
 
 settings = Settings()
 
@@ -110,6 +123,16 @@ adk_runner = Runner(
     app_name=APP_NAME,
     session_service=adk_session_service,
 )
+
+# Separate session service + runner for voice — uses a lightweight agent
+# with thinking disabled to keep latency low.
+_voice_session_service = InMemorySessionService()
+_voice_runner = Runner(
+    agent=voice_agent,
+    app_name=APP_NAME + "_voice",
+    session_service=_voice_session_service,
+)
+_voice_active_sessions: set = set()
 
 # Track active session IDs for the /health and /sessions endpoints
 _active_sessions: set = set()
@@ -270,6 +293,31 @@ async def validate_upload_file(file: UploadFile) -> UploadFile:
         )
 
 # Retry-wrapped ADK runner for transient Gemini API failures
+_HINGLISH_WORDS = {
+    "hai", "hain", "hua", "hue", "hogi", "hoga", "ho", "kar", "karo", "karna",
+    "mujhe", "meri", "mera", "mere", "mein", "main", "mai", "aur", "ya", "nahi",
+    "nhi", "kya", "kuch", "koi", "kal", "aaj", "abhi", "bahut", "thoda", "zyada",
+    "accha", "theek", "theek", "bhi", "toh", "to", "se", "pe", "par", "ko",
+    "ka", "ki", "ke", "ek", "do", "din", "raat", "sar", "sir", "dard", "pet",
+    "bukhar", "khana", "pani", "dawai", "doctor", "matlab", "samajh", "bata",
+    "batao", "lagta", "laga", "tha", "thi", "the", "rahega", "raha", "rahi",
+    "suniye", "suno", "please", "ji", "haan", "haa", "na", "woh", "wo", "yeh",
+    "ye", "unhe", "inhe", "apna", "apni", "apne", "jab", "tab", "kyun", "kaise",
+}
+
+def _detect_language_directive(text: str) -> str:
+    """Return an explicit language directive to prepend to the user message."""
+    if not text:
+        return ""
+    # Devanagari Unicode block: U+0900–U+097F
+    if any('ऀ' <= ch <= 'ॿ' for ch in text):
+        return "[LANGUAGE DIRECTIVE: The patient is writing in Devanagari Hindi. Reply ONLY in Devanagari Hindi. Medical terms may stay in English.]"
+    words = set(text.lower().split())
+    if words & _HINGLISH_WORDS:
+        return "[LANGUAGE DIRECTIVE: The patient is writing in Hinglish. Reply in Hinglish — mix Hindi words (Roman script) with English naturally. Do NOT reply in pure English or pure Devanagari.]"
+    return "[LANGUAGE DIRECTIVE: The patient is writing in English. Reply in ENGLISH ONLY. Do not use any Hindi or Hinglish words.]"
+
+
 @retry(
     stop=stop_after_attempt(3),
     wait=wait_exponential(multiplier=1, min=1, max=8),
@@ -354,6 +402,58 @@ def _is_greeting(text: str) -> bool:
     return cleaned in _GREETING_WORDS or len(cleaned) <= 3
 
 
+async def _bg_persist_voice_turn(
+    session_id: str, uid: str, new_session: bool,
+    msg: str, resp: str, raw_resp: str,
+    safety_res, pid, mem_svc, session_summary: str,
+):
+    """Background task: all DB/memory work after a voice turn. Non-blocking for the audio response."""
+    db = DatabaseManager()
+    if new_session:
+        title = await _generate_session_title(msg, resp)
+        await db.create_chat_session(session_id, uid, title)
+    else:
+        await _maybe_update_session_title(db, session_id, msg, resp)
+    await db.save_chat_message(session_id, uid, "ai", resp)
+    if safety_res.events and pid:
+        await log_safety_events(db, safety_res, session_id, pid, raw_resp)
+    if mem_svc and pid:
+        await mem_svc.extract_and_store_facts(pid, session_id, f"Patient: {msg}\n\nAI: {resp}")
+        if "📋" in resp and "assessment" in resp.lower():
+            outcome = (
+                "emergency" if safety_res.has_emergency else
+                ("consultation_booked" if "book an appointment" in resp.lower() else "prescription_pending")
+            )
+            await mem_svc.save_session_summary(pid, session_id, session_summary or resp, outcome)
+    await db.touch_chat_session(session_id)
+
+
+async def _bg_persist_chat_turn(
+    session_id: str, uid: str, new_session: bool,
+    msg: str, resp: str, raw_resp: str,
+    safety_res, pid, mem_svc, session_summary: str,
+):
+    """Background task: all DB + memory work after a text chat turn. Non-blocking for the response."""
+    db = DatabaseManager()
+    if new_session:
+        title = await _generate_session_title(msg, resp)
+        await db.create_chat_session(session_id, uid, title)
+    else:
+        await _maybe_update_session_title(db, session_id, msg, resp)
+    await db.save_chat_message(session_id, uid, "ai", resp)
+    if safety_res.events and pid:
+        await log_safety_events(db, safety_res, session_id, pid, raw_resp)
+    if mem_svc and pid:
+        await mem_svc.extract_and_store_facts(pid, session_id, f"Patient: {msg}\n\nAI: {resp}")
+        if "📋" in resp and "assessment" in resp.lower():
+            outcome = (
+                "emergency" if safety_res.has_emergency else
+                ("consultation_booked" if "book an appointment" in resp.lower() else "prescription_pending")
+            )
+            await mem_svc.save_session_summary(pid, session_id, session_summary or resp, outcome)
+    await db.touch_chat_session(session_id)
+
+
 async def _generate_session_title(message: str, ai_response: str = "") -> str:
     """Use Gemini to generate a short medical condition noun/phrase for the chat title.
     Uses the patient message + optionally the AI response for better context."""
@@ -363,23 +463,32 @@ async def _generate_session_title(message: str, ai_response: str = "") -> str:
 
     try:
         from google import genai
+        from google.genai import types as _gt
         client = genai.Client()
 
-        # Build context — use AI response too if available (helps when user says "hi" then describes symptoms)
         context = f'Patient: "{message[:300]}"'
         if ai_response:
             context += f'\nAI response: "{ai_response[:300]}"'
 
-        response = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=(
-                f'From this medical chat, extract a short condition/topic noun (2-4 words max). '
-                f'Return ONLY the noun phrase, nothing else. '
-                f'If the conversation is just greetings with no medical topic yet, return exactly "New Consultation".\n'
-                f'Examples of good titles: "Headache", "Lower Back Pain", "Anxiety & Stress", "Skin Rash", "Fever & Cold", "Chest Pain", "Pregnancy Query"\n\n'
-                f'{context}'
-            ),
+        prompt = (
+            f'From this medical chat, extract a short condition/topic noun (2-4 words max). '
+            f'Return ONLY the noun phrase, nothing else. '
+            f'If the conversation is just greetings with no medical topic yet, return exactly "New Consultation".\n'
+            f'Examples of good titles: "Headache", "Lower Back Pain", "Anxiety & Stress", "Skin Rash", "Fever & Cold", "Chest Pain", "Pregnancy Query"\n\n'
+            f'{context}'
         )
+
+        def _call():
+            return client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=prompt,
+                config=_gt.GenerateContentConfig(
+                    thinking_config=_gt.ThinkingConfig(thinking_budget=0),
+                    max_output_tokens=20,
+                ),
+            )
+
+        response = await asyncio.to_thread(_call)
         title = response.text.strip().strip('"').strip("'").strip()
         if title and len(title) <= 60:
             return title
@@ -417,7 +526,24 @@ async def _maybe_update_session_title(db, session_id: str, message: str, ai_resp
         logger.warning(f"_maybe_update_session_title failed: {e}")
 
 
+def _strip_internal_notes(text: str) -> str:
+    """Remove internal model meta-blocks that leak into patient-facing responses.
+
+    The language directive and system-note blocks are injected into the user
+    message so the model knows which language to use. Occasionally the model
+    echoes them back verbatim in its output. They must never appear in the
+    response the patient sees.
+    """
+    import re as _re
+    # Remove [SYSTEM NOTE: ...] and [LANGUAGE DIRECTIVE: ...] blocks (single or multi-line)
+    text = _re.sub(r'\[SYSTEM NOTE:[^\]]*\]\s*', '', text)
+    text = _re.sub(r'\[LANGUAGE DIRECTIVE:[^\]]*\]\s*', '', text)
+    text = _re.sub(r'\[PATIENT CONTEXT\].*?\[END PATIENT CONTEXT\]\s*', '', text, flags=_re.DOTALL)
+    return text.strip()
+
+
 def soften_response(text: str) -> str:
+    text = _strip_internal_notes(text)
     replacements = {
         "You should": "You might consider",
         "You must": "It could really help to",
@@ -446,6 +572,7 @@ def get_message_count(session_id: str) -> int:
 @limiter.limit("30/minute")
 async def chat_endpoint(
     request: Request,
+    background_tasks: BackgroundTasks,
     message: str = Form(...),
     session_id: Optional[str] = Form(None),
     audio: Optional[UploadFile] = File(None),
@@ -482,14 +609,6 @@ async def chat_endpoint(
         current_session_id = session_id or str(uuid.uuid4())
         is_new = current_session_id not in _active_sessions
 
-        if is_new:
-            await adk_session_service.create_session(
-                app_name=APP_NAME,
-                user_id=USER_ID,
-                session_id=current_session_id,
-            )
-            _active_sessions.add(current_session_id)
-
         # Set user context for agent tools (id + name + email from JWT)
         set_current_user(
             user_id or "",
@@ -498,15 +617,118 @@ async def chat_endpoint(
             is_authenticated = current_user is not None,
         )
 
-        # Detect emotional context
-        emotional_context = detect_emotional_context(chat_request.message)
-        adapted_message = chat_request.message
-        if emotional_context == "high_emotional":
-            adapted_message += "\n\n[SYSTEM NOTE: User seems emotionally vulnerable. Lead with 2 sentences of pure validation before any medical information. Be extra gentle.]"
-        elif emotional_context == "sensitive_topic":
-            adapted_message += "\n\n[SYSTEM NOTE: Sensitive topic. Apply double softness, halve info density. Acknowledge emotional weight first.]"
+        # ── Phase 3: Triage pre-assessment (deterministic, before Gemini) ──
+        db_for_memory = DatabaseManager() if user_id else None
+        memory_svc    = MemoryService(db_for_memory) if db_for_memory else None
+
+        # P3: Parallelize ADK session creation + patient memory fetch
+        async def _create_adk_session():
+            if is_new:
+                await adk_session_service.create_session(
+                    app_name=APP_NAME, user_id=USER_ID, session_id=current_session_id,
+                )
+                _active_sessions.add(current_session_id)
+
+        async def _fetch_patient_memory():
+            if not (user_id and memory_svc):
+                return None, {"facts": {}, "recent_summaries": []}
+            # P2: Cache patient_id lookup (immutable — profile → patient mapping never changes)
+            pid = _patient_id_cache.get(user_id)
+            if not pid:
+                pid = await memory_svc.get_patient_id(user_id)
+                if pid:
+                    _patient_id_cache[user_id] = pid
+            if not pid:
+                return None, {"facts": {}, "recent_summaries": []}
+            # P2: Cache patient context per session — skip embedding on follow-up turns
+            ctx_key = f"{pid}:{current_session_id}"
+            if not is_new and ctx_key in _patient_context_cache:
+                return pid, _patient_context_cache[ctx_key]
+            ctx = await memory_svc.get_patient_context(pid, query_text=chat_request.message)
+            _patient_context_cache[ctx_key] = ctx
+            return pid, ctx
+
+        _, (patient_id, patient_context) = await asyncio.gather(
+            _create_adk_session(),
+            _fetch_patient_memory(),
+        )
+
+        triage_result = _triage_engine.score(chat_request.message, patient_context)
+
+        # Hard emergency: skip Gemini entirely — return instant pre-built response
+        if triage_result.is_hard_emergency:
+            logger.warning(f"HARD EMERGENCY detected: session={current_session_id}, score={triage_result.risk_score}")
+            emergency_resp = triage_result.emergency_response
+            if user_id and db_for_memory:
+                background_tasks.add_task(
+                    db_for_memory.save_chat_message,
+                    current_session_id, user_id, "ai", emergency_resp,
+                )
+            return ChatResponse(
+                response=emergency_resp,
+                status="emergency",
+                session_id=current_session_id,
+                session_state="active",
+                additional_data={
+                    "adk_powered": False,
+                    "is_authenticated": current_user is not None,
+                    "is_medical_report": False,
+                    "is_book_appointment": False,
+                    "triage": triage_result.to_dict(),
+                },
+            )
+
+        # ── Phase 2: Emotional context ────────────────────────────────────
+        emotional_ctx = _emotional_builder.build(
+            current_message=chat_request.message,
+            memory_facts=patient_context.get("facts", {}),
+            is_first_message=is_new,
+        )
+
+        # ── Phase 1: Memory context injection (first message of session) ──
+        memory_note  = ""
+        # Prefer name from patient_memory facts over JWT (JWT often has no name)
+        _name_facts  = patient_context.get("facts", {}).get("preference", [])
+        patient_name = next((f["value"] for f in _name_facts if f["key"] == "name"), "")
+        if not patient_name:
+            patient_name = (current_user or {}).get("name", "") if user_id else ""
+        if is_new and patient_id and memory_svc:
+            memory_note = memory_svc.format_context_for_prompt(patient_context)
+
+        # ── Phase 6: Build enriched prompt ────────────────────────────────
+        # Triage note is NOT injected for URGENT/MODERATE — Gemini assesses
+        # those naturally. Hard emergencies are already bypassed above.
+        # Only inject for specialty routing hint (memory context only).
+        if is_new and memory_note:
+            adapted_message = _context_builder.build_first_message(
+                message=chat_request.message,
+                memory_note=memory_note,
+                emotional_note=emotional_ctx["system_note"],
+                triage_note="",
+                patient_name=patient_name if memory_note else None,
+            )
+        else:
+            adapted_message = _context_builder.build(
+                message=chat_request.message,
+                emotional_note=emotional_ctx["system_note"],
+                triage_note="",
+            )
 
         msg_count = get_message_count(current_session_id)
+
+        # ── Vision Layer: inject pending image context if present ──────────
+        # A previous /chat/upload-image call may have stored a [IMAGE CONTEXT]
+        # block for this session.  Consume it exactly once here so the AI
+        # sees the visual findings on the patient's very next message.
+        _image_ctx = _pending_image_contexts.pop(current_session_id, None)
+        if _image_ctx:
+            adapted_message = f"{_image_ctx}\n\n{adapted_message}"
+            logger.info(f"Image context injected into chat turn: session={current_session_id}")
+
+        # Prepend per-message language directive so Gemini reliably mirrors the patient
+        lang_directive = _detect_language_directive(chat_request.message)
+        if lang_directive:
+            adapted_message = f"{lang_directive}\n\n{adapted_message}"
 
         # Build ADK user message
         content = genai_types.Content(
@@ -536,29 +758,27 @@ async def chat_endpoint(
 
         final_response = soften_response(final_response)
 
+        # ── Phase 5: Safety validation ─────────────────────────────────────
+        raw_response   = final_response
+        safety_result  = _safety_validator.validate(
+            response=final_response,
+            patient_context=patient_context,
+            session_id=current_session_id,
+            patient_id=patient_id,
+        )
+        final_response = safety_result.response
+
         if msg_count % 5 == 0:
             final_response += "\n\n_Just a reminder — everything you share here is completely private and stays between us._ 💙"
 
-        # Persist session metadata (keywords + AI recommendation only — no full message history)
+        # P1: All DB + memory work runs in background — response is returned immediately
         if user_id:
-            db = DatabaseManager()
-
-            # ── Session keyword title (chief complaint / medical topic) ──────────
-            if is_new:
-                title = await _generate_session_title(message, final_response)
-                await db.create_chat_session(current_session_id, user_id, title)
-            else:
-                # Update title once we have richer medical context
-                await _maybe_update_session_title(db, current_session_id, message, final_response)
-
-            # ── Save AI recommendation only (skip verbatim user messages) ───────
-            # We store only the AI's last response per exchange; this captures
-            # diagnosis notes, treatment advice, and prescriptions without
-            # recording the full back-and-forth conversation text.
-            await db.save_chat_message(current_session_id, user_id, "ai", final_response)
-
-            # Touch session updated_at
-            await db.touch_chat_session(current_session_id)
+            background_tasks.add_task(
+                _bg_persist_chat_turn,
+                current_session_id, user_id, is_new,
+                message, final_response, raw_response,
+                safety_result, patient_id, memory_svc, _session_summary,
+            )
 
         status = "session_started" if is_new else "message_processed"
 
@@ -650,6 +870,675 @@ async def chat_endpoint(
     except Exception as e:
         logger.error(f"Internal server error in chat_endpoint: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error occurred")
+
+# ── Image Vision Layer ──────────────────────────────────────────────────────
+#
+# In-process dict keyed by session_id storing the [IMAGE CONTEXT] prompt note
+# for the *next* chat turn.  Entries are consumed (pop'd) exactly once so the
+# context is injected into the very first follow-up message and then discarded.
+#
+# This avoids any DB round-trip on the hot chat path while guaranteeing the
+# image context is always available when the patient sends their next message.
+_pending_image_contexts: Dict[str, str] = {}
+
+# Per-session patient context cache — avoids repeating the ~1.5s
+# text-embedding-004 API call on every follow-up turn within a session.
+# _patient_id_cache:      user_id (profile UUID) → patients.id
+# _patient_context_cache: "{patient_id}:{session_id}" → context dict
+_patient_id_cache: Dict[str, str] = {}
+_patient_context_cache: Dict[str, dict] = {}
+
+_ALLOWED_IMAGE_MIMETYPES = {
+    "image/jpeg", "image/jpg", "image/png",
+    "image/webp", "image/gif", "image/heic", "image/heif",
+}
+_MAX_IMAGE_BYTES = 10 * 1024 * 1024  # 10 MB
+
+
+class ImageAnalysisResponse(BaseModel):
+    image_type:         str
+    description:        str
+    medical_context:    str
+    suggested_questions: List[str]
+    urgency_flag:       str
+    session_id:         str
+
+
+@app.post("/chat/upload-image", response_model=ImageAnalysisResponse)
+@limiter.limit("10/minute")
+async def upload_image_endpoint(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    image: UploadFile = File(...),
+    session_id: Optional[str] = Form(None),
+    current_user: Optional[Dict] = Depends(get_current_user_optional),
+):
+    """
+    Analyse a patient-uploaded image with Gemini 2.5-flash vision.
+
+    - Accepts multipart/form-data with an 'image' file field.
+    - Returns structured findings (image_type, description, medical_context,
+      suggested_questions, urgency_flag).
+    - Stores a [IMAGE CONTEXT] note keyed by session_id so the very next
+      /chat turn automatically receives it as part of the prompt.
+    - For authenticated users, persists a lightweight fact to patient_memory
+      and a full record to chat_image_analyses.
+    """
+    # ── Validate MIME type ──────────────────────────────────────────────────
+    content_type = (image.content_type or "").lower()
+    if content_type not in _ALLOWED_IMAGE_MIMETYPES:
+        # Attempt to guess from filename
+        import mimetypes as _mimetypes
+        guessed, _ = _mimetypes.guess_type(image.filename or "")
+        if guessed and guessed.lower() in _ALLOWED_IMAGE_MIMETYPES:
+            content_type = guessed.lower()
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Unsupported file type '{content_type}'. "
+                    "Please upload a JPEG, PNG, WEBP, or GIF image."
+                ),
+            )
+
+    # ── Read & size-check ───────────────────────────────────────────────────
+    image_bytes = await image.read()
+    if len(image_bytes) > _MAX_IMAGE_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail="Image too large. Maximum allowed size is 10 MB.",
+        )
+    if not image_bytes:
+        raise HTTPException(status_code=400, detail="Empty image file.")
+
+    # ── Resolve session ─────────────────────────────────────────────────────
+    current_session_id = session_id or str(uuid.uuid4())
+
+    # Ensure the ADK session exists so the next /chat turn can attach to it
+    if current_session_id not in _active_sessions:
+        try:
+            await adk_session_service.create_session(
+                app_name=APP_NAME,
+                user_id=USER_ID,
+                session_id=current_session_id,
+            )
+            _active_sessions.add(current_session_id)
+        except Exception as _e:
+            logger.warning(f"Could not pre-create ADK session for image upload: {_e}")
+
+    # ── Analyse image ───────────────────────────────────────────────────────
+    vision_svc = get_vision_service()
+    analysis = await vision_svc.analyse_image(
+        image_bytes=image_bytes,
+        mime_type=content_type,
+        session_id=current_session_id,
+        patient_id=None,  # resolved below if authenticated
+    )
+
+    # ── Store context note for next chat turn ───────────────────────────────
+    _pending_image_contexts[current_session_id] = analysis["prompt_note"]
+    logger.info(
+        f"Image context stored for session={current_session_id}: "
+        f"type={analysis['image_type']}, urgency={analysis['urgency_flag']}"
+    )
+
+    # ── Persist to memory (background, authenticated only) ──────────────────
+    user_id = current_user["sub"] if current_user else None
+    if user_id:
+        db_bg = DatabaseManager()
+        memory_svc = MemoryService(db_bg)
+
+        async def _persist():
+            try:
+                patient_id = await memory_svc.get_patient_id(user_id)
+                if patient_id:
+                    await vision_svc.persist_to_memory(
+                        db=db_bg,
+                        patient_id=patient_id,
+                        session_id=current_session_id,
+                        analysis=analysis,
+                        filename=image.filename or "upload",
+                    )
+            except Exception as _exc:
+                logger.warning(f"Vision persist background task failed: {_exc}")
+
+        background_tasks.add_task(_persist)
+
+    return ImageAnalysisResponse(
+        image_type=analysis["image_type"],
+        description=analysis["description"],
+        medical_context=analysis.get("medical_context", ""),
+        suggested_questions=analysis.get("suggested_questions", []),
+        urgency_flag=analysis.get("urgency_flag", "none"),
+        session_id=current_session_id,
+    )
+
+
+# ── Voice Pipeline: ElevenLabs STT (Scribe v1) → Gemini ADK → ElevenLabs TTS ──────────────────
+#
+# POST /chat/voice
+# Accepts multipart/form-data:
+#   audio    — audio file (webm/mp4/wav/ogg/mp3)
+#   session_id — optional existing session ID
+#
+# Returns:
+#   audio/mpeg stream (MP3 from ElevenLabs TTS)
+#   Headers:
+#     X-Transcript  — user's transcribed text
+#     X-AI-Text     — AI text response (stripped of markdown)
+#     X-Session-Id  — session ID used
+#
+
+_VOICE_AUDIO_MIMETYPES = {
+    "audio/webm", "audio/mp4", "audio/wav", "audio/wave",
+    "audio/ogg", "audio/mpeg", "audio/mp3",
+    "application/octet-stream",  # Safari often sends this
+}
+_MAX_VOICE_BYTES = 25 * 1024 * 1024  # 25 MB max
+
+
+async def _tts_to_bytes(text: str) -> bytes:
+    """Generate MP3 audio bytes — ElevenLabs primary, edge-tts fallback."""
+    import httpx as _httpx
+    el_key = os.getenv("ELEVENLABS_API_KEY", "")
+    if el_key:
+        try:
+            voice_id = os.getenv("ELEVENLABS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM")
+            model_id = os.getenv("ELEVENLABS_MODEL_ID", "eleven_multilingual_v2")
+            async with _httpx.AsyncClient(timeout=20) as _el_client:
+                resp = await _el_client.post(
+                    f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}",
+                    headers={
+                        "xi-api-key": el_key,
+                        "Content-Type": "application/json",
+                        "Accept": "audio/mpeg",
+                    },
+                    json={
+                        "text": text,
+                        "model_id": model_id,
+                        "voice_settings": {"stability": 0.5, "similarity_boost": 0.75},
+                    },
+                )
+            if resp.status_code == 200:
+                return resp.content
+            logger.warning(f"ElevenLabs TTS {resp.status_code} — falling back to edge-tts")
+        except Exception as _el_err:
+            logger.warning(f"ElevenLabs TTS error: {_el_err} — falling back to edge-tts")
+
+    # Fallback: edge-tts
+    import edge_tts, io, re as _re
+    _deva = _re.compile(r'[\u0900-\u097F]')
+    _voice = "hi-IN-SwaraNeural" if _deva.search(text) else "en-IN-NeerjaNeural"
+    buf = io.BytesIO()
+    async for chunk in edge_tts.Communicate(text, _voice).stream():
+        if chunk["type"] == "audio":
+            buf.write(chunk["data"])
+    return buf.getvalue()
+
+
+# Pre-generate and cache the waiting message audio so the frontend plays
+# the same voice as the rest of the conversation.
+_waiting_audio_cache: bytes | None = None
+_WAITING_MESSAGE = (
+    "I'm preparing your medical assessment right now. "
+    "This usually takes around 10 to 15 seconds — thank you so much for your patience."
+)
+
+@app.get("/chat/waiting-audio")
+async def waiting_audio_endpoint():
+    """Return a cached MP3 of the waiting message using the same TTS pipeline as AI responses."""
+    global _waiting_audio_cache
+    if _waiting_audio_cache is None:
+        _waiting_audio_cache = await _tts_to_bytes(_WAITING_MESSAGE)
+    from fastapi.responses import Response as _Resp
+    return _Resp(content=_waiting_audio_cache, media_type="audio/mpeg")
+
+
+@app.post("/chat/voice")
+@limiter.limit("20/minute")
+async def voice_chat_endpoint(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    audio: UploadFile = File(...),
+    session_id: Optional[str] = Form(None),
+    current_user: Optional[Dict] = Depends(get_current_user_optional),
+):
+    """
+    Server-side voice pipeline:
+      1. Transcribe audio via Gemini 2.5-flash multimodal STT
+      2. Pass transcript through existing Gemini/ADK chat pipeline (identical to /chat)
+      3. Convert AI text response to speech via edge-tts (hi-IN-SwaraNeural or en-IN-NeerjaNeural)
+      4. Return MP3 audio stream with transcript/AI-text in response headers
+    """
+    from fastapi.responses import StreamingResponse
+    import io
+
+    # ── 1. Read & validate audio file ───────────────────────────────────────
+    audio_bytes = await audio.read()
+    if not audio_bytes:
+        raise HTTPException(status_code=400, detail="Empty audio file.")
+    if len(audio_bytes) > _MAX_VOICE_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail="Audio file too large. Maximum size is 25 MB.",
+        )
+
+    # Pre-STT setup — user_id and session are known before transcription completes
+    import asyncio as _aio
+    user_id = current_user["sub"] if current_user else None
+    current_session_id = session_id or str(uuid.uuid4())
+    is_new = current_session_id not in _active_sessions
+    db_for_memory = DatabaseManager() if user_id else None
+    memory_svc = MemoryService(db_for_memory) if db_for_memory else None
+
+    set_current_user(
+        user_id or "",
+        name             = (current_user or {}).get("name", ""),
+        email            = (current_user or {}).get("email", ""),
+        is_authenticated = current_user is not None,
+    )
+
+    # ── 2. Parallel: STT + session creation + patient ID lookup ─────────────
+    # All three are independent — run concurrently to eliminate serial waiting.
+    try:
+        _ct = (audio.content_type or "").lower()
+        if "mp4" in _ct or "m4a" in _ct:
+            _audio_filename = "audio.mp4"
+            _audio_mime = "audio/mp4"
+        elif "wav" in _ct or "wave" in _ct:
+            _audio_filename = "audio.wav"
+            _audio_mime = "audio/wav"
+        elif "ogg" in _ct:
+            _audio_filename = "audio.ogg"
+            _audio_mime = "audio/ogg"
+        elif "mpeg" in _ct or "mp3" in _ct:
+            _audio_filename = "audio.mp3"
+            _audio_mime = "audio/mpeg"
+        else:
+            _audio_filename = "audio.webm"
+            _audio_mime = "audio/webm"  # default — Chrome MediaRecorder output
+
+        async def _run_stt_async():
+            """Transcribe via ElevenLabs Scribe v1 (primary), Gemini 2.5-flash fallback."""
+            import httpx as _hx
+            _el_key = os.getenv("ELEVENLABS_API_KEY", "")
+            if _el_key:
+                try:
+                    async with _hx.AsyncClient(timeout=30) as _stt_client:
+                        resp = await _stt_client.post(
+                            "https://api.elevenlabs.io/v1/speech-to-text",
+                            headers={"xi-api-key": _el_key},
+                            files={"file": (_audio_filename, audio_bytes, _audio_mime)},
+                            data={
+                                "model_id": "scribe_v1",
+                                "tag_audio_events": "false",
+                                "diarize": "false",
+                            },
+                        )
+                    if resp.status_code == 200:
+                        return resp.json().get("text", "").strip()
+                    logger.warning(f"ElevenLabs STT {resp.status_code} — falling back to Gemini STT")
+                except Exception as _stt_err:
+                    logger.warning(f"ElevenLabs STT error: {_stt_err} — falling back to Gemini STT")
+
+            # Fallback: Gemini 2.5-flash STT
+            from google.genai import types as _stt_types
+            def _gemini_stt():
+                from google import genai as _stt_genai
+                _c = _stt_genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
+                return _c.models.generate_content(
+                    model="gemini-2.5-flash",
+                    contents=[
+                        _stt_types.Part.from_bytes(data=audio_bytes, mime_type=_audio_mime),
+                        _stt_types.Part.from_text(text=(
+                            "Transcribe this audio exactly as spoken. "
+                            "Output ONLY the transcribed text, nothing else. "
+                            "Preserve the original language (Hindi or English or mixed Hinglish)."
+                        )),
+                    ],
+                    config=_stt_types.GenerateContentConfig(
+                        thinking_config=_stt_types.ThinkingConfig(thinking_budget=0),
+                    ),
+                )
+            stt_resp = await _aio.to_thread(_gemini_stt)
+            return (stt_resp.text or "").strip()
+
+        async def _create_session_if_new():
+            if is_new:
+                await adk_session_service.create_session(
+                    app_name=APP_NAME,
+                    user_id=USER_ID,
+                    session_id=current_session_id,
+                )
+                _active_sessions.add(current_session_id)
+
+        async def _fetch_patient_context():
+            """Fetch patient_id + context, runs parallel with STT. Uses P2 cache."""
+            if not (user_id and memory_svc):
+                return None, {"facts": {}, "recent_summaries": []}
+            # P2: cache patient_id (immutable)
+            pid = _patient_id_cache.get(user_id)
+            if not pid:
+                pid = await memory_svc.get_patient_id(user_id)
+                if pid:
+                    _patient_id_cache[user_id] = pid
+            if not pid:
+                return None, {"facts": {}, "recent_summaries": []}
+            # P2: skip DB + embedding on follow-up turns within same session
+            ctx_key = f"{pid}:{current_session_id}"
+            if not is_new and ctx_key in _patient_context_cache:
+                return pid, _patient_context_cache[ctx_key]
+            # transcript not yet available (parallel with STT) — use recency retrieval
+            ctx = await memory_svc.get_patient_context(pid, query_text=None)
+            _patient_context_cache[ctx_key] = ctx
+            return pid, ctx
+
+        transcript, _, (patient_id, patient_context) = await _aio.gather(
+            _run_stt_async(),
+            _create_session_if_new(),
+            _fetch_patient_context(),
+        )
+
+        logger.info(f"STT transcript ({len(transcript)} chars): '{transcript[:120]}'")
+    except Exception as e:
+        logger.error(f"STT error: {e}", exc_info=True)
+        raise HTTPException(status_code=502, detail=f"Speech transcription failed: {str(e)}")
+
+    if not transcript or len(transcript) < 3:
+        # Instead of a hard error, return a graceful TTS nudge so the conversation continues
+        _noise_text = "Sorry, I couldn't hear that clearly — could you speak again?"
+        try:
+            _noise_audio = await _tts_to_bytes(_noise_text)
+        except Exception:
+            _noise_audio = b""
+
+        from fastapi.responses import StreamingResponse as _SR
+        import urllib.parse as _ulp_n
+        _safe_n = lambda v: _ulp_n.quote(v.replace("\n", " "), safe=" !\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~")[:500]
+        _noise_hdrs = {
+            "X-Transcript": "",
+            "X-AI-Text": _safe_n(_noise_text),
+            "X-Session-Id": current_session_id,
+            "X-Is-Medical-Report": "false",
+            "X-Is-Book-Appointment": "false",
+            "X-Triage": "",
+            "X-Specialty": "",
+            "Access-Control-Expose-Headers": (
+                "X-Transcript, X-AI-Text, X-Session-Id, "
+                "X-Is-Medical-Report, X-Is-Book-Appointment, X-Triage, X-Specialty"
+            ),
+        }
+        if _noise_audio:
+            return _SR(io.BytesIO(_noise_audio), media_type="audio/mpeg", headers=_noise_hdrs)
+        raise HTTPException(status_code=400, detail=_noise_text)
+
+    # ── 3. Run through existing Gemini/ADK chat pipeline ─────────────────────
+    # user_id, current_session_id, is_new, memory_svc, patient_id, patient_context
+    # are all already set above from the parallel phase.
+    chat_request = ChatRequest(message=transcript, session_id=session_id)
+
+    triage_result = _triage_engine.score(transcript, patient_context)
+
+    if triage_result.is_hard_emergency:
+        logger.warning(f"HARD EMERGENCY in voice turn: session={current_session_id}")
+        emergency_resp = triage_result.emergency_response
+        # TTS for emergency response
+        try:
+            _emrg_text = stripMarkdown_py(emergency_resp)
+            audio_data = await _tts_to_bytes(_emrg_text)
+        except Exception as tts_err:
+            logger.error(f"TTS error for emergency response: {tts_err}")
+            audio_data = b""
+
+        def _safe_hdr_emrg(v: str, n: int = 500) -> str:
+            import urllib.parse as _ulp_emrg
+            s = v.replace("\r\n", " ").replace("\n", " ").replace("\r", " ")
+            return _ulp_emrg.quote(s, safe=" !\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~")[:n]
+
+        headers = {
+            "X-Transcript":           _safe_hdr_emrg(transcript),
+            "X-AI-Text":              _safe_hdr_emrg(emergency_resp),
+            "X-Session-Id":           current_session_id,
+            "X-Is-Medical-Report":    "false",
+            "X-Is-Book-Appointment":  "false",
+            "X-Triage":               "",
+            "X-Specialty":            "",
+            "Access-Control-Expose-Headers": (
+                "X-Transcript, X-AI-Text, X-Session-Id, "
+                "X-Is-Medical-Report, X-Is-Book-Appointment, X-Triage, X-Specialty"
+            ),
+        }
+        if audio_data:
+            return StreamingResponse(
+                io.BytesIO(audio_data),
+                media_type="audio/mpeg",
+                headers=headers,
+            )
+        raise HTTPException(status_code=200, detail=emergency_resp)
+
+    # Emotional + memory context
+    emotional_ctx = _emotional_builder.build(
+        current_message=transcript,
+        memory_facts=patient_context.get("facts", {}),
+        is_first_message=is_new,
+    )
+    memory_note  = ""
+    _name_facts  = patient_context.get("facts", {}).get("preference", [])
+    patient_name = next((f["value"] for f in _name_facts if f["key"] == "name"), "")
+    if not patient_name:
+        patient_name = (current_user or {}).get("name", "") if user_id else ""
+    if is_new and patient_id and memory_svc:
+        memory_note = memory_svc.format_context_for_prompt(patient_context)
+
+    if is_new and memory_note:
+        adapted_message = _context_builder.build_first_message(
+            message=transcript,
+            memory_note=memory_note,
+            emotional_note=emotional_ctx["system_note"],
+            triage_note="",
+            patient_name=patient_name if memory_note else None,
+        )
+    else:
+        adapted_message = _context_builder.build(
+            message=transcript,
+            emotional_note=emotional_ctx["system_note"],
+            triage_note="",
+        )
+
+    # Inject pending image context if present
+    _image_ctx = _pending_image_contexts.pop(current_session_id, None)
+    if _image_ctx:
+        adapted_message = f"{_image_ctx}\n\n{adapted_message}"
+
+    # ── 3b. Run through the same ADK agent pipeline as /chat ────────────────
+    msg_count = get_message_count(current_session_id)
+
+    # Prepend per-message language directive (same as text /chat)
+    lang_directive = _detect_language_directive(transcript)
+    if lang_directive:
+        adapted_message = f"{lang_directive}\n\n{adapted_message}"
+
+    content = genai_types.Content(
+        role="user",
+        parts=[genai_types.Part.from_text(text=adapted_message)],
+    )
+
+    final_response = await _run_adk_agent(current_session_id, USER_ID, content)
+
+    if not final_response:
+        final_response = "I'm sorry, I couldn't process your message. Please try again."
+
+    # Session summary (same as text chat)
+    _session_summary = ""
+    try:
+        _sess = await adk_session_service.get_session(
+            app_name=APP_NAME, user_id=USER_ID, session_id=current_session_id
+        )
+        _session_summary = (_sess.state or {}).get("summary_result", "")
+        if _session_summary and "📋" in _session_summary and _session_summary.strip() not in final_response:
+            final_response = _session_summary.strip() + "\n\n---\n\n" + final_response
+    except Exception:
+        pass
+
+    final_response = soften_response(final_response)
+
+    # Safety validation
+    raw_response  = final_response
+    safety_result = _safety_validator.validate(
+        response=final_response,
+        patient_context=patient_context,
+        session_id=current_session_id,
+        patient_id=patient_id,
+    )
+    final_response = safety_result.response
+
+    if msg_count % 5 == 0:
+        final_response += "\n\n_Just a reminder — everything you share here is completely private and stays between us._ 💙"
+
+    # All DB/memory work runs in the background — audio response does not depend on it.
+    if user_id:
+        background_tasks.add_task(
+            _bg_persist_voice_turn,
+            current_session_id, user_id, is_new,
+            transcript, final_response, raw_response,
+            safety_result, patient_id, memory_svc, _session_summary,
+        )
+
+    # ── 4. edge-tts TTS ──────────────────────────────────────────────────────
+    tts_text = stripMarkdown_py(final_response)
+
+    # Voice: when the response is a medical report, always use a short fixed
+    # phrase — reading the full triage card aloud is noisy and unhelpful.
+    import re as _re_tts
+    _card_start = _re_tts.search(r'📋\s*MEDIVORA|MEDIVORA HEALTH ASSESSMENT', tts_text)
+    if _card_start:
+        # Medical report — speak a short, warm fixed phrase instead of reading the card
+        tts_text = (
+            "Your medical assessment is ready. "
+            "Please check the screen and tap Book an Appointment to connect with a specialist."
+        )
+
+    # Truncate to 800 chars for voice — keeps TTS fast (~1s) and audio short
+    if len(tts_text) > 800:
+        tts_text = tts_text[:800].rsplit(' ', 1)[0] + "…"
+
+    try:
+        audio_data = await _tts_to_bytes(tts_text)
+        logger.info(
+            f"TTS generated {len(audio_data)} bytes for session={current_session_id}"
+        )
+    except Exception as tts_err:
+        logger.error(f"TTS error: {tts_err}", exc_info=True)
+        raise HTTPException(status_code=502, detail=f"Text-to-speech failed: {str(tts_err)}")
+
+    def _safe_header(value: str, max_len: int = 500) -> str:
+        """Sanitise a string for use as an HTTP header value.
+
+        HTTP/1.1 headers must be Latin-1 safe. Non-ASCII chars are
+        percent-encoded (RFC 3986) so the header stays valid.
+        The frontend must call decodeURIComponent() to decode them back.
+
+        For large content (max_len > 500, i.e. medical reports), newlines are
+        preserved as %0A so the frontend can reconstruct line breaks.
+        For short headers (transcript, small text), newlines are collapsed to spaces.
+        """
+        import urllib.parse as _ulp
+        if max_len > 500:
+            # Preserve newlines as %0A for structured content (triage cards)
+            sanitised = value.replace("\r\n", "\n").replace("\r", "\n")
+            encoded = _ulp.quote(sanitised, safe=" !\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~")
+        else:
+            sanitised = value.replace("\r\n", " ").replace("\n", " ").replace("\r", " ")
+            encoded = _ulp.quote(sanitised, safe=" !\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~")
+        return encoded[:max_len]
+
+    # ── Detect triage/booking/report flags (mirrors /chat logic) ───────────────
+    from medivora_agent.tools import _latest_triage, _latest_approval_specialty
+    import json as _json_v
+
+    _v_is_medical_report = (
+        "📋" in final_response and (
+            "medical assessment" in final_response.lower() or
+            "health assessment" in final_response.lower()
+        )
+    )
+    _v_is_book_appointment = "book an appointment" in final_response.lower()
+
+    _v_triage: dict | None = None
+    _v_specialty: str | None = None
+    if user_id and user_id in _latest_triage:
+        _v_triage = _latest_triage.pop(user_id)
+    if user_id and user_id in _latest_approval_specialty:
+        _v_specialty = _latest_approval_specialty.pop(user_id)
+
+    if not _v_specialty:
+        import re as _re_vsp
+        _V_SPEC_ROOTS = [
+            ("gastroenterolog", "gastroenterology"),
+            ("cardiolog",       "cardiology"),
+            ("gynaecolog",      "womens_health"),
+            ("gynecolog",       "womens_health"),
+            ("obstetric",       "womens_health"),
+            ("pediatr",         "pediatrics"),
+            ("paediatr",        "pediatrics"),
+            ("dermatolog",      "dermatology"),
+            ("orthopaed",       "orthopedics"),
+            ("orthoped",        "orthopedics"),
+            ("pulmonolog",      "pulmonology"),
+            ("neurolog",        "neurology"),
+            ("ophthalmolog",    "ophthalmology"),
+            ("otolaryngolog",   "ent"),
+        ]
+        def _v_extract_sp(text):
+            if not text:
+                return None
+            m = _re_vsp.search(r'Special(?:ty|ist)\s+Needed\*?\*?[:\s]+([a-zA-Z_]+)', text, _re_vsp.I)
+            if m:
+                return m.group(1).lower().strip()
+            tl = text.lower()
+            for root, key in _V_SPEC_ROOTS:
+                if root in tl:
+                    return key
+            return None
+        _v_specialty = _v_extract_sp(_session_summary) or _v_extract_sp(final_response)
+
+    headers = {
+        "X-Transcript":           _safe_header(transcript),
+        # Medical reports need the full text so the triage card renders completely.
+        # Regular turns stay at 500 chars (only audio matters, text isn't shown).
+        "X-AI-Text":              _safe_header(final_response, max_len=4000 if _v_is_medical_report else 500),
+        "X-Session-Id":           current_session_id,
+        "X-Is-Medical-Report":    "true" if _v_is_medical_report else "false",
+        "X-Is-Book-Appointment":  "true" if _v_is_book_appointment else "false",
+        "X-Triage":               _safe_header(_json_v.dumps(_v_triage), max_len=2000) if _v_triage else "",
+        "X-Specialty":            _v_specialty or "",
+        "Access-Control-Expose-Headers": (
+            "X-Transcript, X-AI-Text, X-Session-Id, "
+            "X-Is-Medical-Report, X-Is-Book-Appointment, X-Triage, X-Specialty"
+        ),
+    }
+
+    return StreamingResponse(
+        io.BytesIO(audio_data),
+        media_type="audio/mpeg",
+        headers=headers,
+    )
+
+
+def stripMarkdown_py(text: str) -> str:
+    """Strip markdown formatting for TTS — mirrors frontend stripMarkdown()."""
+    import re as _re
+    text = _re.sub(r'\*\*(.*?)\*\*', r'\1', text)
+    text = _re.sub(r'\*(.*?)\*', r'\1', text)
+    text = _re.sub(r'#{1,6}\s*', '', text)
+    text = _re.sub(r'`{1,3}[^`]*`{1,3}', '', text)
+    text = _re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', text)
+    text = text.replace('&nbsp;', ' ').replace('•', '').replace('📋', '').replace('💙', '')
+    text = _re.sub(r'<[^>]+>', '', text)
+    text = _re.sub(r'\n{2,}', '. ', text)
+    text = text.replace('\n', ' ')
+    return text.strip()
+
 
 # ── Pre-login Chat Restore ───────────────────────────────────────
 
@@ -875,7 +1764,7 @@ async def send_otp(request: Request, phone: str = Form(...)):
     """
     Send a 6-digit OTP to the given phone number.
     In development (no SMS provider configured), the OTP is returned directly.
-    In production, set SMS_PROVIDER=twilio and configure TWILIO_* env vars.
+    In production, set SMS_PROVIDER=msg91 and configure MSG91_* env vars.
     """
     import random
     phone = phone.strip()
@@ -888,18 +1777,26 @@ async def send_otp(request: Request, phone: str = Form(...)):
 
     # Check if a real SMS provider is configured
     sms_provider = os.getenv("SMS_PROVIDER", "demo")
-    if sms_provider == "twilio":
+    if sms_provider == "msg91":
         try:
-            from twilio.rest import Client as TwilioClient
-            tc = TwilioClient(os.getenv("TWILIO_ACCOUNT_SID"), os.getenv("TWILIO_AUTH_TOKEN"))
-            tc.messages.create(
-                body=f"Your Medivora OTP is: {otp}. Valid for 1 minute.",
-                from_=os.getenv("TWILIO_FROM_NUMBER"),
-                to=phone,
+            import httpx as _httpx
+            payload = {
+                "flow_id": os.getenv("MSG91_OTP_TEMPLATE_ID", ""),
+                "sender": os.getenv("MSG91_SENDER_ID", "MEDVRA"),
+                "mobiles": phone,
+                "OTP": otp,
+            }
+            resp = _httpx.post(
+                "https://control.msg91.com/api/v5/flow/",
+                json=payload,
+                headers={"authkey": os.getenv("MSG91_AUTH_KEY", ""), "Content-Type": "application/json"},
+                timeout=10,
             )
-            return {"message": "OTP sent via SMS", "demo": False}
+            if resp.status_code == 200:
+                return {"message": "OTP sent via SMS", "demo": False}
+            logger.error(f"MSG91 SMS failed: {resp.status_code} {resp.text}")
         except Exception as e:
-            logger.error(f"Twilio SMS failed: {e}")
+            logger.error(f"MSG91 SMS failed: {e}")
             # Fall through to demo mode
 
     # Demo mode — return OTP in response so dev can test without SMS
@@ -2239,18 +3136,26 @@ async def doctor_send_otp(request: Request, phone: str = Form(...)):
     await db.create_otp(phone, otp, ttl_minutes=1)
     logger.info(f"Doctor OTP generated for {phone}: {otp}")
     sms_provider = os.getenv("SMS_PROVIDER", "demo")
-    if sms_provider == "twilio":
+    if sms_provider == "msg91":
         try:
-            from twilio.rest import Client as TwilioClient
-            tc = TwilioClient(os.getenv("TWILIO_ACCOUNT_SID"), os.getenv("TWILIO_AUTH_TOKEN"))
-            tc.messages.create(
-                body=f"Your Medivora Doctor Portal OTP is: {otp}. Valid for 1 minute.",
-                from_=os.getenv("TWILIO_FROM_NUMBER"),
-                to=phone,
+            import httpx as _httpx
+            payload = {
+                "flow_id": os.getenv("MSG91_OTP_TEMPLATE_ID", ""),
+                "sender": os.getenv("MSG91_SENDER_ID", "MEDVRA"),
+                "mobiles": phone,
+                "OTP": otp,
+            }
+            resp = _httpx.post(
+                "https://control.msg91.com/api/v5/flow/",
+                json=payload,
+                headers={"authkey": os.getenv("MSG91_AUTH_KEY", ""), "Content-Type": "application/json"},
+                timeout=10,
             )
-            return {"message": "OTP sent via SMS", "demo": False}
+            if resp.status_code == 200:
+                return {"message": "OTP sent via SMS", "demo": False}
+            logger.error(f"MSG91 SMS failed: {resp.status_code} {resp.text}")
         except Exception as e:
-            logger.error(f"Twilio SMS failed: {e}")
+            logger.error(f"MSG91 SMS failed: {e}")
     return {"message": "OTP ready (demo mode)", "demo": True, "otp": otp}
 
 

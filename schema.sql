@@ -998,5 +998,147 @@ CREATE INDEX IF NOT EXISTS idx_lab_reports_patient ON lab_reports(patient_id);
 ALTER TABLE lab_reports ENABLE ROW LEVEL SECURITY;
 CREATE POLICY "Service role full access" ON lab_reports FOR ALL USING (true) WITH CHECK (true);
 
+-- ─────────────────────────────────────────────────────────────────────────
+-- TABLE: patient_memory — structured facts extracted from conversations
+-- ─────────────────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS patient_memory (
+    id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    patient_id      UUID NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
+    memory_type     VARCHAR(50) NOT NULL
+                      CHECK (memory_type IN (
+                        'condition', 'allergy', 'medication',
+                        'preference', 'emotional_state', 'other'
+                      )),
+    key             VARCHAR(255) NOT NULL,
+    value           TEXT NOT NULL,
+    confidence      FLOAT DEFAULT 1.0 CHECK (confidence BETWEEN 0 AND 1),
+    source_session  UUID REFERENCES chat_sessions(id) ON DELETE SET NULL,
+    created_at      TIMESTAMPTZ DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE (patient_id, memory_type, key)
+);
+CREATE INDEX IF NOT EXISTS idx_patient_memory_patient ON patient_memory(patient_id);
+CREATE INDEX IF NOT EXISTS idx_patient_memory_type   ON patient_memory(patient_id, memory_type);
+ALTER TABLE patient_memory ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Service role full access" ON patient_memory FOR ALL USING (true) WITH CHECK (true);
+CREATE TRIGGER trg_patient_memory_updated
+    BEFORE UPDATE ON patient_memory
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+
+-- ─────────────────────────────────────────────────────────────────────────
+-- TABLE: conversation_summaries — one summary per completed chat session
+-- Phase 4: embedding vector(768) column added after pgvector is enabled
+-- ─────────────────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS conversation_summaries (
+    id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    patient_id      UUID NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
+    session_id      UUID NOT NULL REFERENCES chat_sessions(id) ON DELETE CASCADE,
+    summary_text    TEXT NOT NULL,
+    chief_complaint VARCHAR(500),
+    outcome         VARCHAR(100) DEFAULT 'home_care'
+                      CHECK (outcome IN (
+                        'home_care', 'prescription_pending',
+                        'consultation_booked', 'emergency', 'unknown'
+                      )),
+    embedding       vector(768),  -- Phase 4: pgvector enabled, semantic search active
+    created_at      TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_conv_summaries_patient ON conversation_summaries(patient_id);
+CREATE INDEX IF NOT EXISTS idx_conv_summaries_session ON conversation_summaries(session_id);
+CREATE INDEX IF NOT EXISTS idx_conv_summaries_embedding ON conversation_summaries
+    USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);
+ALTER TABLE conversation_summaries ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Service role full access" ON conversation_summaries FOR ALL USING (true) WITH CHECK (true);
+
+CREATE OR REPLACE FUNCTION match_conversation_summaries(
+    query_embedding   vector(768),
+    match_patient_id  UUID,
+    match_count       INT DEFAULT 3
+) RETURNS TABLE (
+    id              UUID,
+    summary_text    TEXT,
+    chief_complaint VARCHAR,
+    outcome         VARCHAR,
+    created_at      TIMESTAMPTZ,
+    similarity      FLOAT
+) LANGUAGE plpgsql AS $$
+BEGIN
+    RETURN QUERY
+    SELECT cs.id, cs.summary_text, cs.chief_complaint, cs.outcome,
+           cs.created_at,
+           1 - (cs.embedding <=> query_embedding) AS similarity
+    FROM conversation_summaries cs
+    WHERE cs.patient_id = match_patient_id
+      AND cs.embedding IS NOT NULL
+    ORDER BY cs.embedding <=> query_embedding
+    LIMIT match_count;
+END;
+$$;
+
+-- ─────────────────────────────────────────────────────────────────────────
+-- TABLE: safety_events — AI response safety audit log
+-- ─────────────────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS safety_events (
+    id                  UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    session_id          UUID REFERENCES chat_sessions(id) ON DELETE SET NULL,
+    patient_id          UUID REFERENCES patients(id) ON DELETE SET NULL,
+    event_type          VARCHAR(100) NOT NULL,
+    severity            VARCHAR(50) NOT NULL
+                          CHECK (severity IN ('info', 'warning', 'blocked', 'critical')),
+    raw_response        TEXT,
+    sanitized_response  TEXT,
+    details             JSONB DEFAULT '{}'::jsonb,
+    created_at          TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_safety_events_session  ON safety_events(session_id);
+CREATE INDEX IF NOT EXISTS idx_safety_events_patient  ON safety_events(patient_id);
+CREATE INDEX IF NOT EXISTS idx_safety_events_type     ON safety_events(event_type);
+CREATE INDEX IF NOT EXISTS idx_safety_events_severity ON safety_events(severity);
+ALTER TABLE safety_events ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Service role full access" ON safety_events FOR ALL USING (true) WITH CHECK (true);
+
+-- ALTER triage_assessments: add triage engine columns
+ALTER TABLE triage_assessments
+    ADD COLUMN IF NOT EXISTS triage_score     INT,
+    ADD COLUMN IF NOT EXISTS routing_decision VARCHAR(100),
+    ADD COLUMN IF NOT EXISTS pre_gemini       BOOLEAN DEFAULT FALSE;
+
+-- ─────────────────────────────────────────────────────────────────────────
+-- patient_memory: add image_upload as an allowed memory_type
+-- (ALTER CONSTRAINT is not directly supported; recreate the check constraint)
+-- ─────────────────────────────────────────────────────────────────────────
+-- The check constraint on memory_type is named automatically; drop and re-add.
+ALTER TABLE patient_memory
+    DROP CONSTRAINT IF EXISTS patient_memory_memory_type_check;
+
+ALTER TABLE patient_memory
+    ADD CONSTRAINT patient_memory_memory_type_check
+    CHECK (memory_type IN (
+      'condition', 'allergy', 'medication',
+      'preference', 'emotional_state', 'image_upload', 'other'
+    ));
+
+-- ─────────────────────────────────────────────────────────────────────────
+-- TABLE: chat_image_analyses — full audit log of uploaded image analyses
+-- ─────────────────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS chat_image_analyses (
+    id               UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    patient_id       UUID REFERENCES patients(id) ON DELETE SET NULL,
+    session_id       UUID REFERENCES chat_sessions(id) ON DELETE SET NULL,
+    filename         VARCHAR(500),
+    image_type       VARCHAR(100) NOT NULL DEFAULT 'other',
+    description      TEXT,
+    medical_context  TEXT,
+    urgency_flag     VARCHAR(50) DEFAULT 'none'
+                       CHECK (urgency_flag IN ('none', 'monitor', 'seek_care', 'urgent')),
+    full_analysis    JSONB DEFAULT '{}'::jsonb,
+    created_at       TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_chat_image_analyses_patient  ON chat_image_analyses(patient_id);
+CREATE INDEX IF NOT EXISTS idx_chat_image_analyses_session  ON chat_image_analyses(session_id);
+ALTER TABLE chat_image_analyses ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Service role full access" ON chat_image_analyses FOR ALL USING (true) WITH CHECK (true);
+
 -- DONE! All tables created with indexes, triggers, and RLS policies.
 -- ═══════════════════════════════════════════════════════════════════════════
