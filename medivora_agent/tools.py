@@ -432,6 +432,15 @@ def determine_specialty(symptoms_text: str, diagnosis: str = "") -> dict:
     }
 
 
+def assess_and_route(symptoms_text: str, diagnosis: str = "") -> dict:
+    """Combined risk assessment + specialty determination in a single call.
+    Replaces calling assess_risk and determine_specialty separately — saves one API round-trip.
+    Returns risk_level, action, specialty, and confidence in one response."""
+    risk = assess_risk(symptoms_text)
+    specialty = determine_specialty(symptoms_text, diagnosis)
+    return {**risk, **specialty}
+
+
 def get_nearby_facilities(location: str, risk_level: str) -> dict:
     """Get nearby healthcare facilities based on location and risk level."""
     cache_key = f"facilities:{location}:{risk_level}"
@@ -639,6 +648,7 @@ def save_patient_to_db(name: str, age: int, phone: str = "", gender: str = "unkn
     """Save a patient to the database and return patient_id."""
     try:
         from models import PatientProfile
+        import threading as _threading
         patient_id = f"patient_{uuid.uuid4().hex[:10]}"
         now = datetime.now()
         patient = PatientProfile(
@@ -646,7 +656,8 @@ def save_patient_to_db(name: str, age: int, phone: str = "", gender: str = "unkn
             address="", medical_history=[], allergies=[], current_medications=[],
             emergency_contact="", created_at=now, updated_at=now,
         )
-        _run_async(_db.save_patient(patient))
+        # Fire-and-forget — patient_id is already generated; no need to block on the write
+        _threading.Thread(target=lambda: _run_async(_db.save_patient(patient)), daemon=True).start()
         return {"status": "success", "patient_id": patient_id, "name": name}
     except Exception as e:
         logger.error(f"save_patient_to_db failed: {e}")
@@ -868,37 +879,45 @@ def create_approval_and_notify(
             "priority": priority,
             "created_at": datetime.now().isoformat(),
         }
-        _run_async(_db.save_approval_request(approval_request))
-
-        # Save anonymous patient so JOIN works
-        from models import PatientProfile
-        now = datetime.now()
-        anon = PatientProfile(
-            id=patient_id, name=patient_name or "Anonymous User", age=25,
-            gender="unknown", phone="", address="", medical_history=[],
-            allergies=[], current_medications=[], emergency_contact="",
-            created_at=now, updated_at=now,
-        )
-        try:
-            _run_async(_db.save_patient(anon))
-        except Exception:
-            pass
-
-        # Notify doctors matching the determined specialty
+        # Fetch doctors synchronously — we need the count for the return value
+        # and must fire notifications before this function returns.
         doctors = _run_async(_db.get_available_doctors(determined_specialty))
         notif_msg = f"Naya prescription approval ({determined_specialty}): {patient_name or 'Anonymous'}, Symptoms: {symptoms[:80]}, Risk: {risk_level}"
 
-        if doctors:
-            _run_async(_db.assign_doctor_to_approval(approval_id, doctors[0]["id"]))
-            for doc in doctors:
+        import threading as _threading
+        from models import PatientProfile as _PP
+
+        def _bg_writes():
+            """Fire-and-forget: save approval + patient + notifications in background."""
+            try:
+                _run_async(_db.save_approval_request(approval_request))
+            except Exception:
+                pass
+            try:
+                now2 = datetime.now()
+                anon = _PP(
+                    id=patient_id, name=patient_name or "Anonymous User", age=25,
+                    gender="unknown", phone="", address="", medical_history=[],
+                    allergies=[], current_medications=[], emergency_contact="",
+                    created_at=now2, updated_at=now2,
+                )
+                _run_async(_db.save_patient(anon))
+            except Exception:
+                pass
+            if doctors:
                 try:
-                    _run_async(_db.save_notification(doc["id"], approval_id, notif_msg, priority))
+                    _run_async(_db.assign_doctor_to_approval(approval_id, doctors[0]["id"]))
                 except Exception:
                     pass
+                for doc in doctors:
+                    try:
+                        _run_async(_db.save_notification(doc["id"], approval_id, notif_msg, priority))
+                    except Exception:
+                        pass
+                if risk_level in ("EMERGENCY", "URGENT"):
+                    _send_external_notification(doctors, approval_id, patient_name, symptoms, risk_level, determined_specialty)
 
-            # ── External notification for URGENT/EMERGENCY cases ──
-            if risk_level in ("EMERGENCY", "URGENT"):
-                _send_external_notification(doctors, approval_id, patient_name, symptoms, risk_level, determined_specialty)
+        _threading.Thread(target=_bg_writes, daemon=True).start()
 
         result = {
             "status": "success",

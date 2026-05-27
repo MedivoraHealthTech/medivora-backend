@@ -8,7 +8,25 @@ English input → English reply. Hinglish input → Hinglish reply. Devanagari i
 from datetime import datetime
 
 from google.adk.agents import Agent, SequentialAgent
+from google.genai import types as _genai_types
 from . import tools
+
+# Shared configs — disable thinking for agents that don't need it
+_NO_THINK = _genai_types.GenerateContentConfig(
+    thinking_config=_genai_types.ThinkingConfig(thinking_budget=0),
+)
+_NO_THINK_SHORT = _genai_types.GenerateContentConfig(
+    thinking_config=_genai_types.ThinkingConfig(thinking_budget=0),
+    max_output_tokens=150,   # prescription_agent always outputs 1-2 lines
+)
+_NO_THINK_CARD = _genai_types.GenerateContentConfig(
+    thinking_config=_genai_types.ThinkingConfig(thinking_budget=0),
+    max_output_tokens=600,   # triage card is ~300-400 tokens
+)
+_LIGHT_THINK = _genai_types.GenerateContentConfig(
+    thinking_config=_genai_types.ThinkingConfig(thinking_budget=512),
+    max_output_tokens=512,   # medical assessment — some reasoning needed
+)
 
 DOCTOR_PERSONA = """You are Medivora AI health Assistant who understand health related issues and concerns.
 
@@ -93,11 +111,10 @@ Always extract the patient name, age, and gender from this block FIRST.
 NEVER write "Not provided" for Name if [PATIENT CONTEXT] has a real name.
 
 CLINICAL WORKFLOW:
-1. Call assess_risk to evaluate severity
-2. Call determine_specialty to identify the right specialist
-3. Build differential — most dangerous first, then most likely
-4. Give medicines with exact dose/frequency/duration
-5. Advice: what to do NOW → watch for → when to escalate
+1. Call assess_and_route ONCE — returns risk_level AND specialty together (single call)
+2. Build differential — most dangerous first, then most likely
+3. Give medicines with exact dose/frequency/duration
+4. Advice: what to do NOW → watch for → when to escalate
 
 DRUG SAFETY — PREGNANCY (ABSOLUTE RULES):
 FORBIDDEN: NSAIDs (diclofenac, ibuprofen, aspirin, naproxen, mefenamic acid,
@@ -127,8 +144,12 @@ Advice:
 Warning Signs: <specific red flags — listed AFTER advice>
 Follow-up: <when, how urgent>
 """,
-    tools=[tools.assess_risk, tools.determine_specialty],
+    tools=[tools.assess_and_route],
     output_key="consultation_result",
+    generate_content_config=_genai_types.GenerateContentConfig(
+        thinking_config=_genai_types.ThinkingConfig(thinking_budget=0),
+        max_output_tokens=512,
+    ),
 )
 
 
@@ -141,26 +162,27 @@ prescription_agent = Agent(
 Based on {{consultation_result}}, do the following:
 
 1. Extract: patient symptoms, diagnosis, risk level, specialty, medicines list
-2. Call create_approval_and_notify — THIS IS MANDATORY:
+2. Call create_approval_and_notify — THIS IS MANDATORY AND THE ONLY TOOL CALL:
    - patient_name: use the actual patient name from consultation_result. If name is "Anonymous" or missing, use "Not provided". NEVER pass "Anonymous".
    - symptoms: all symptoms (include gestational age if pregnant)
    - diagnosis: from consultation
    - risk_level: EMERGENCY, URGENT, or ROUTINE — NEVER downgrade
    - prescription_text: full medicines list with dosage, frequency, duration
    - specialty: determined specialty
-3. Call get_nearby_facilities for hospital/clinic recommendations
 
 RULES:
 - You MUST call create_approval_and_notify. No prescription exists without it.
+- Do NOT call get_nearby_facilities — it is not needed.
 - If the tool returns a safety_warning, include it in your output.
 - NEVER downgrade risk_level from what consultation_agent determined.
 
-After calling tools, output ONLY:
+After calling the tool, output ONLY:
 "Prescription created. Approval ID: <approval_id>. Specialty: <specialty>. Doctors notified: <count>. Risk: <risk_level>."
 Mention any safety warnings or removed drugs briefly. Do NOT repeat the full consultation.
 """,
-    tools=[tools.create_approval_and_notify, tools.get_nearby_facilities],
+    tools=[tools.create_approval_and_notify],
     output_key="prescription_result",
+    generate_content_config=_NO_THINK_SHORT,
 )
 
 
@@ -265,6 +287,7 @@ summary_agent = Agent(
     instruction=_summary_instruction,
     tools=[],
     output_key="summary_result",
+    generate_content_config=_NO_THINK_CARD,
 )
 
 
@@ -279,7 +302,6 @@ assessment_pipeline = SequentialAgent(
 # ── Voice Agent (fast path — no thinking, no assessment pipeline) ─
 # Used exclusively by /chat/voice to avoid the full sequential assessment
 # pipeline which adds 3–4 s and produces output not suited for speech.
-from google.genai import types as _genai_types
 
 _voice_instruction = f"""{DOCTOR_PERSONA}
 
@@ -358,17 +380,16 @@ If the message contains [PATIENT MEMORY — ...], this is a RETURNING PATIENT.
 - Proceed directly to asking about their current concern
 
 NEW PATIENT (no PATIENT MEMORY in message):
-Use check_if_symptoms:
 - Greeting only → warmly ask: "Before we begin, could you share your name, age, and gender? This helps me give you accurate guidance."
-- Symptoms present but no profile → extract_symptoms AND ask name/age/gender in same response: "I can see you're dealing with [symptom]. To give you the most accurate guidance, could you quickly share your name, age, and gender?"
-- Registration info provided → extract_registration → save_patient_to_db → confirm warmly and proceed to symptoms
+- Symptoms present but no profile → ask name/age/gender in same response: "I can see you're dealing with [symptom]. To give you the most accurate guidance, could you quickly share your name, age, and gender?"
+- Registration info provided → extract name/age/gender DIRECTLY from their message (no tool needed) → call save_patient_to_db(name, age, gender) → confirm warmly and proceed
 
 STEP 2 — COLLECT SYMPTOMS (ask questions one per message, minimum 3 exchanges before assessment)
 
 HARD RULE: Do NOT call assessment_pipeline until you have asked AND received answers for ALL of:
   0. Patient name — MANDATORY. If unknown, ask IMMEDIATELY before anything else:
      "Before we begin, could you quickly share your name, age, and gender? This helps me give you accurate guidance."
-     Wait for the answer. Save via extract_registration + save_patient_to_db. Do NOT proceed without a name.
+     Wait for the answer. Parse name/age/gender inline and call save_patient_to_db directly. Do NOT proceed without a name.
   1. What exactly is the symptom / what does it feel like?
   2. How long has this been going on? (duration)
   3. Severity — mild, moderate, or severe? Any associated symptoms?
@@ -433,14 +454,11 @@ CRITICAL RULES:
 - NEVER open with the worst possible diagnosis
 """,
     tools=[
-        tools.check_if_symptoms,
-        tools.extract_registration,
-        tools.extract_symptoms,
         tools.save_patient_to_db,
-        tools.assess_risk,
-        tools.determine_specialty,
-        tools.get_nearby_facilities,
-        tools.create_approval_and_notify,
     ],
     sub_agents=[assessment_pipeline],
+    generate_content_config=_genai_types.GenerateContentConfig(
+        thinking_config=_genai_types.ThinkingConfig(thinking_budget=0),
+        max_output_tokens=512,
+    ),
 )
