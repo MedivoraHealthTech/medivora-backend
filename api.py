@@ -1406,10 +1406,19 @@ async def voice_chat_endpoint(
         HTTP/1.1 headers must be Latin-1 safe. Non-ASCII chars are
         percent-encoded (RFC 3986) so the header stays valid.
         The frontend must call decodeURIComponent() to decode them back.
+
+        For large content (max_len > 500, i.e. medical reports), newlines are
+        preserved as %0A so the frontend can reconstruct line breaks.
+        For short headers (transcript, small text), newlines are collapsed to spaces.
         """
         import urllib.parse as _ulp
-        sanitised = value.replace("\r\n", " ").replace("\n", " ").replace("\r", " ")
-        encoded = _ulp.quote(sanitised, safe=" !\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~")
+        if max_len > 500:
+            # Preserve newlines as %0A for structured content (triage cards)
+            sanitised = value.replace("\r\n", "\n").replace("\r", "\n")
+            encoded = _ulp.quote(sanitised, safe=" !\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~")
+        else:
+            sanitised = value.replace("\r\n", " ").replace("\n", " ").replace("\r", " ")
+            encoded = _ulp.quote(sanitised, safe=" !\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~")
         return encoded[:max_len]
 
     # ── Detect triage/booking/report flags (mirrors /chat logic) ───────────────
