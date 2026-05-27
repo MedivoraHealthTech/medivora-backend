@@ -1075,6 +1075,25 @@ async def _tts_to_bytes(text: str) -> bytes:
             buf.write(chunk["data"])
     return buf.getvalue()
 
+
+# Pre-generate and cache the waiting message audio so the frontend plays
+# the same voice as the rest of the conversation.
+_waiting_audio_cache: bytes | None = None
+_WAITING_MESSAGE = (
+    "I'm preparing your medical assessment right now. "
+    "This usually takes around 10 to 15 seconds — thank you so much for your patience."
+)
+
+@app.get("/chat/waiting-audio")
+async def waiting_audio_endpoint():
+    """Return a cached MP3 of the waiting message using the same TTS pipeline as AI responses."""
+    global _waiting_audio_cache
+    if _waiting_audio_cache is None:
+        _waiting_audio_cache = await _tts_to_bytes(_WAITING_MESSAGE)
+    from fastapi.responses import Response as _Resp
+    return _Resp(content=_waiting_audio_cache, media_type="audio/mpeg")
+
+
 @app.post("/chat/voice")
 @limiter.limit("20/minute")
 async def voice_chat_endpoint(
@@ -1388,21 +1407,16 @@ async def voice_chat_endpoint(
     # ── 4. edge-tts TTS ──────────────────────────────────────────────────────
     tts_text = stripMarkdown_py(final_response)
 
-    # Voice: strip the long formatted medical report card (📋 MEDIVORA HEALTH
-    # ASSESSMENT) — reading it aloud adds ~5s and adds no conversational value.
-    # Keep only the first meaningful spoken paragraph before the card.
+    # Voice: when the response is a medical report, always use a short fixed
+    # phrase — reading the full triage card aloud is noisy and unhelpful.
     import re as _re_tts
     _card_start = _re_tts.search(r'📋\s*MEDIVORA|MEDIVORA HEALTH ASSESSMENT', tts_text)
     if _card_start:
-        tts_text = tts_text[:_card_start.start()].strip()
-        if not tts_text:
-            # If nothing precedes the card, read just severity + next step
-            _sev = _re_tts.search(r'(MILD|MODERATE|SEVERE|VERY.SEVERE)[^\n]*', final_response)
-            _step = _re_tts.search(r'NEXT STEP[^\n]*\n([^\n]+)', final_response)
-            parts = []
-            if _sev: parts.append(_sev.group(0).strip())
-            if _step: parts.append(_step.group(1).strip())
-            tts_text = ". ".join(parts) if parts else "Your assessment is ready. Please check the screen for details."
+        # Medical report — speak a short, warm fixed phrase instead of reading the card
+        tts_text = (
+            "Your medical assessment is ready. "
+            "Please check the screen and tap Book an Appointment to connect with a specialist."
+        )
 
     # Truncate to 800 chars for voice — keeps TTS fast (~1s) and audio short
     if len(tts_text) > 800:
