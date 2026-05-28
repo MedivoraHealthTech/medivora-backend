@@ -21,12 +21,17 @@ async def list_doctors(specialty: Optional[str] = None, current_user=Depends(get
     doctors = await db.get_all_doctors(patient_facing=True)
     if specialty:
         spec_lower = specialty.lower().strip().replace("_", " ")
+        sp_tokens = set(spec_lower.split())
         def _matches(d):
-            # Normalise DB value: "general_physician" → "general physician"
             db_spec = (d.get("specialization") or "").lower().replace("_", " ")
-            # Forward: "general physician" in query ("senior general physician") ✓
-            # Reverse: query in DB value (exact/short queries like "cardiology") ✓
-            return db_spec in spec_lower or spec_lower in db_spec
+            db_tokens = set(db_spec.split())
+            # Token match: prevents short terms like 'ent' from matching 'gastroenterology'
+            if db_tokens & sp_tokens:
+                return True
+            # Multi-word containment fallback (e.g. "senior general physician" ↔ "general physician")
+            if len(sp_tokens) > 1 and len(db_tokens) > 1:
+                return db_spec in spec_lower or spec_lower in db_spec
+            return False
         filtered = [d for d in doctors if _matches(d)]
         doctors = filtered if filtered else doctors
     return {"doctors": doctors, "count": len(doctors), "filtered_by": specialty or None}
