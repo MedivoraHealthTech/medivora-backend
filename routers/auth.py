@@ -2,9 +2,18 @@
 Auth Router — Signup, Login, OTP endpoints.
 """
 
+import re as _re
 import random
 import string
 from datetime import datetime, timezone
+
+
+def _parse_ts(ts) -> datetime:
+    """Parse a Supabase timestamp — handles variable microsecond digits (Python 3.10 compat)."""
+    if not isinstance(ts, str):
+        return ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
+    ts = _re.sub(r'\.(\d+)', lambda m: '.' + m.group(1)[:6].ljust(6, '0'), ts)
+    return datetime.fromisoformat(ts.replace("Z", "+00:00"))
 
 import httpx
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
@@ -44,12 +53,13 @@ async def _send_via_msg91_flow(phone: str, otp: str) -> None:
     """Send OTP via MSG91 Flow (SMS) API. Passes OTP into the DLT-registered SMS template."""
     mobile = phone.lstrip("+")  # MSG91 expects no leading +
     payload = {
-        "flow_id":    settings.MSG91_OTP_TEMPLATE_ID,
-        "sender":     settings.MSG91_SENDER_ID,
-        "mobiles":    mobile,
-        "OTP":        otp,
-        "DLT_TE_ID":  settings.MSG91_DLT_TEMPLATE_ID,
+        "flow_id": settings.MSG91_OTP_TEMPLATE_ID,
+        "sender":  settings.MSG91_SENDER_ID,
+        "mobiles": mobile,
+        "OTP":     otp,
     }
+    if settings.MSG91_DLT_TEMPLATE_ID:
+        payload["DLT_TE_ID"] = settings.MSG91_DLT_TEMPLATE_ID
     async with httpx.AsyncClient(timeout=10) as client:
         resp = await client.post(
             "https://control.msg91.com/api/v5/flow/",
@@ -61,6 +71,7 @@ async def _send_via_msg91_flow(phone: str, otp: str) -> None:
     data = resp.json()
     if data.get("type") == "error":
         raise HTTPException(status_code=502, detail=f"MSG91: {data.get('message', 'Unknown error')}")
+    return data
 
 
 # ── POST /auth/send-patient-otp ──────────────────────────────────────
@@ -76,7 +87,7 @@ async def send_patient_otp(req: _PatientOTPSendRequest):
     # Cooldown: prevent MSG91 error 311 (duplicate SMS within 10s) and abuse
     latest = db.get_latest_otp(req.phone)
     if latest:
-        created_at = datetime.fromisoformat(latest["created_at"].replace("Z", "+00:00"))
+        created_at = _parse_ts(latest["created_at"])
         elapsed = (datetime.now(timezone.utc) - created_at).total_seconds()
         if elapsed < OTP_SEND_COOLDOWN_SECONDS:
             wait = int(OTP_SEND_COOLDOWN_SECONDS - elapsed)
@@ -253,8 +264,20 @@ async def login(req: LoginRequest, request: Request):
 
 @router.post("/send-otp")
 async def send_otp(req: SendOTPRequest):
-    """Send a 6-digit OTP to the given phone number."""
+    """Send a 6-digit OTP to the given phone number via MSG91."""
     db = get_db()
+
+    # Cooldown: prevent abuse and MSG91 duplicate-SMS errors
+    latest = db.get_latest_otp(req.phone)
+    if latest:
+        created_at = _parse_ts(latest["created_at"])
+        elapsed = (datetime.now(timezone.utc) - created_at).total_seconds()
+        if elapsed < OTP_SEND_COOLDOWN_SECONDS:
+            wait = int(OTP_SEND_COOLDOWN_SECONDS - elapsed)
+            raise HTTPException(
+                status_code=429,
+                detail=f"Please wait {wait} seconds before requesting a new OTP.",
+            )
 
     otp = _generate_otp()
     db.create_otp(phone=req.phone, otp_code=otp, ttl_minutes=settings.OTP_TTL_MINUTES)
@@ -268,24 +291,10 @@ async def send_otp(req: SendOTPRequest):
             "note": "Mock mode — OTP returned in response for development",
         }
 
-    # Production — send via Twilio
-    if not settings.TWILIO_ACCOUNT_SID or not settings.TWILIO_AUTH_TOKEN or not settings.TWILIO_FROM_NUMBER:
-        raise HTTPException(
-            status_code=500,
-            detail="SMS service not configured. Set TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, and TWILIO_FROM_NUMBER.",
-        )
-
-    try:
-        from twilio.rest import Client as TwilioClient
-        client = TwilioClient(settings.TWILIO_ACCOUNT_SID, settings.TWILIO_AUTH_TOKEN)
-        client.messages.create(
-            body=f"Your Medivora OTP is: {otp}. Valid for {settings.OTP_TTL_MINUTES} minute. Do not share this code.",
-            from_=settings.TWILIO_FROM_NUMBER,
-            to=req.phone,
-        )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to send OTP via SMS: {str(e)}")
-
+    # Production — send via MSG91
+    if not settings.MSG91_AUTH_KEY or not settings.MSG91_OTP_TEMPLATE_ID:
+        raise HTTPException(status_code=500, detail="MSG91 not configured on server.")
+    await _send_via_msg91_flow(req.phone, otp)
     return {"message": "OTP sent successfully", "phone": req.phone}
 
 
