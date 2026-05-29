@@ -2,8 +2,20 @@
 Auth Router — Signup, Login, OTP endpoints.
 """
 
+import re as _re
 import random
 import string
+from datetime import datetime, timezone
+
+
+
+def _parse_ts(ts) -> datetime:
+    """Parse a Supabase timestamp — handles variable microsecond digits (Python 3.10 compat)."""
+    if not isinstance(ts, str):
+        return ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
+    ts = _re.sub(r'\.(\d+)', lambda m: '.' + m.group(1)[:6].ljust(6, '0'), ts)
+    return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+
 
 import httpx
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
@@ -25,75 +37,120 @@ from schemas.auth import (
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 
-class SendPatientOTPRequest(BaseModel):
-    phone: str
+class _PatientOTPSendRequest(BaseModel):
+    phone: str  # E.164 format, e.g. +919876543210
 
 
-class VerifyPatientOTPRequest(BaseModel):
+class _PatientOTPVerifyRequest(BaseModel):
     phone: str
     otp: str
-
-
-# ── POST /auth/send-patient-otp ──────────────────────────────────────
-# Proxies Supabase phone OTP request server-side to avoid browser CORS issues.
-
-@router.post("/send-patient-otp")
-async def send_patient_otp(req: SendPatientOTPRequest):
-    """Send Supabase phone OTP — proxied server-side to bypass browser CORS."""
-    # Use anon key if set, fall back to service key — both are valid for /auth/v1/otp
-    apikey = settings.SUPABASE_ANON_KEY or settings.SUPABASE_KEY
-    if not apikey:
-        raise HTTPException(status_code=500, detail="Supabase API key not configured")
-    async with httpx.AsyncClient(timeout=15) as client:
-        resp = await client.post(
-            f"{settings.SUPABASE_URL}/auth/v1/otp",
-            json={"phone": req.phone},
-            headers={
-                "apikey": apikey,
-                "Content-Type": "application/json",
-            },
-        )
-    if not resp.is_success:
-        data = resp.json() if resp.content else {}
-        detail = data.get("msg") or data.get("error_description") or data.get("message") or "Failed to send OTP"
-        raise HTTPException(status_code=resp.status_code, detail=detail)
-    return {"message": "OTP sent successfully"}
-
-
-# ── POST /auth/verify-patient-otp ────────────────────────────────────
-# Verifies Supabase phone OTP server-side and returns Supabase session tokens.
-
-@router.post("/verify-patient-otp")
-async def verify_patient_otp(req: VerifyPatientOTPRequest):
-    """Verify Supabase phone OTP — returns access_token + refresh_token for client-side session."""
-    apikey = settings.SUPABASE_ANON_KEY or settings.SUPABASE_KEY
-    if not apikey:
-        raise HTTPException(status_code=500, detail="Supabase API key not configured")
-    async with httpx.AsyncClient(timeout=15) as client:
-        resp = await client.post(
-            f"{settings.SUPABASE_URL}/auth/v1/verify",
-            json={"phone": req.phone, "token": req.otp, "type": "sms"},
-            headers={
-                "apikey": apikey,
-                "Content-Type": "application/json",
-            },
-        )
-    if not resp.is_success:
-        data = resp.json() if resp.content else {}
-        detail = data.get("msg") or data.get("error_description") or data.get("message") or "Invalid or expired OTP"
-        raise HTTPException(status_code=resp.status_code, detail=detail)
-    data = resp.json()
-    return {
-        "access_token": data.get("access_token"),
-        "refresh_token": data.get("refresh_token"),
-        "token_type": data.get("token_type", "bearer"),
-        "user": data.get("user"),
-    }
 
 
 def _generate_otp(length: int = 6) -> str:
     """Generate a random numeric OTP."""
     return "".join(random.choices(string.digits, k=length))
+
+
+async def _send_via_msg91_flow(phone: str, otp: str) -> None:
+    """Send OTP via MSG91 Flow (SMS) API. Passes OTP into the DLT-registered SMS template."""
+    mobile = phone.lstrip("+")  # MSG91 expects no leading +
+    payload = {
+        "flow_id": settings.MSG91_OTP_TEMPLATE_ID,
+        "sender":  settings.MSG91_SENDER_ID,
+        "mobiles": mobile,
+        "OTP":     otp,
+    }
+    if settings.MSG91_DLT_TEMPLATE_ID:
+        payload["DLT_TE_ID"] = settings.MSG91_DLT_TEMPLATE_ID
+    async with httpx.AsyncClient(timeout=10) as client:
+        resp = await client.post(
+            "https://control.msg91.com/api/v5/flow/",
+            json=payload,
+            headers={"authkey": settings.MSG91_AUTH_KEY, "Content-Type": "application/json"},
+        )
+    if resp.status_code != 200:
+        raise HTTPException(status_code=502, detail=f"MSG91 error {resp.status_code}: {resp.text[:200]}")
+    data = resp.json()
+    if data.get("type") == "error":
+        raise HTTPException(status_code=502, detail=f"MSG91: {data.get('message', 'Unknown error')}")
+    return data
+
+
+# ── POST /auth/send-patient-otp ──────────────────────────────────────
+# Generates OTP, stores in DB, sends via MSG91 Flow (SMS) API.
+
+OTP_SEND_COOLDOWN_SECONDS = 30
+
+@router.post("/send-patient-otp")
+async def send_patient_otp(req: _PatientOTPSendRequest):
+    """Send a 6-digit OTP to a patient phone via MSG91."""
+    db = get_db()
+
+    # Cooldown: prevent MSG91 error 311 (duplicate SMS within 10s) and abuse
+    latest = db.get_latest_otp(req.phone)
+    if latest:
+        created_at = _parse_ts(latest["created_at"])
+        elapsed = (datetime.now(timezone.utc) - created_at).total_seconds()
+        if elapsed < OTP_SEND_COOLDOWN_SECONDS:
+            wait = int(OTP_SEND_COOLDOWN_SECONDS - elapsed)
+            raise HTTPException(
+                status_code=429,
+                detail=f"Please wait {wait} seconds before requesting a new OTP.",
+            )
+
+    otp = _generate_otp()
+    db.create_otp(phone=req.phone, otp_code=otp, ttl_minutes=settings.OTP_TTL_MINUTES)
+
+    if settings.OTP_MOCK_MODE:
+        return {"message": "OTP sent successfully (mock)", "otp": otp}
+
+    if not settings.MSG91_AUTH_KEY or not settings.MSG91_OTP_TEMPLATE_ID:
+        raise HTTPException(status_code=500, detail="MSG91 not configured on server.")
+    await _send_via_msg91_flow(req.phone, otp)
+    return {"message": "OTP sent successfully"}
+
+
+# ── POST /auth/verify-patient-otp ────────────────────────────────────
+# Verifies OTP against local DB (OTP was stored on send).
+
+@router.post("/verify-patient-otp")
+async def verify_patient_otp(req: _PatientOTPVerifyRequest):
+    """Verify patient OTP and return a custom JWT. Creates profile on first login."""
+    db = get_db()
+
+    if not db.verify_otp(phone=req.phone, otp_code=req.otp):
+        raise HTTPException(status_code=400, detail="Invalid or expired OTP.")
+
+    existing = db.get_profile_by_phone(req.phone)
+    is_new_user = existing is None
+
+    if is_new_user:
+        placeholder_hash = hash_password("otp_verified_no_password")
+        profile = db.create_profile(
+            phone=req.phone,
+            first_name="",
+            last_name="",
+            password_hash=placeholder_hash,
+            user_type="patient",
+        )
+        db.create_patient(profile_id=profile["id"])
+    else:
+        profile = existing
+
+    if profile.get("status", "active") != "active":
+        raise HTTPException(status_code=403, detail=f"Account is {profile['status']}.")
+
+    db.update_profile(profile["id"], {"phone_verified": True})
+    db.update_last_login(profile["id"])
+
+    token = create_token(user_id=str(profile["id"]), role="patient")
+    return {
+        "token":      token,
+        "user_id":    str(profile["id"]),
+        "user_type":  "patient",
+        "full_name":  _name(profile.get("first_name"), profile.get("last_name")),
+        "is_new_user": is_new_user,
+    }
 
 
 def _get_client_ip(request: Request) -> str:
@@ -209,8 +266,20 @@ async def login(req: LoginRequest, request: Request):
 
 @router.post("/send-otp")
 async def send_otp(req: SendOTPRequest):
-    """Send a 6-digit OTP to the given phone number."""
+    """Send a 6-digit OTP to the given phone number via MSG91."""
     db = get_db()
+
+    # Cooldown: prevent abuse and MSG91 duplicate-SMS errors
+    latest = db.get_latest_otp(req.phone)
+    if latest:
+        created_at = _parse_ts(latest["created_at"])
+        elapsed = (datetime.now(timezone.utc) - created_at).total_seconds()
+        if elapsed < OTP_SEND_COOLDOWN_SECONDS:
+            wait = int(OTP_SEND_COOLDOWN_SECONDS - elapsed)
+            raise HTTPException(
+                status_code=429,
+                detail=f"Please wait {wait} seconds before requesting a new OTP.",
+            )
 
     otp = _generate_otp()
     db.create_otp(phone=req.phone, otp_code=otp, ttl_minutes=settings.OTP_TTL_MINUTES)
@@ -226,29 +295,8 @@ async def send_otp(req: SendOTPRequest):
 
     # Production — send via MSG91
     if not settings.MSG91_AUTH_KEY or not settings.MSG91_OTP_TEMPLATE_ID:
-        raise HTTPException(
-            status_code=500,
-            detail="SMS service not configured. Set MSG91_AUTH_KEY and MSG91_OTP_TEMPLATE_ID.",
-        )
-
-    try:
-        import httpx
-        payload = {
-            "flow_id": settings.MSG91_OTP_TEMPLATE_ID,
-            "sender": settings.MSG91_SENDER_ID,
-            "mobiles": req.phone,
-            "OTP": otp,
-        }
-        resp = httpx.post(
-            "https://control.msg91.com/api/v5/flow/",
-            json=payload,
-            headers={"authkey": settings.MSG91_AUTH_KEY, "Content-Type": "application/json"},
-            timeout=10,
-        )
-        if resp.status_code != 200:
-            raise Exception(f"MSG91 returned {resp.status_code}: {resp.text}")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to send OTP via SMS: {str(e)}")
+        raise HTTPException(status_code=500, detail="MSG91 not configured on server.")
+    await _send_via_msg91_flow(req.phone, otp)
 
     return {"message": "OTP sent successfully", "phone": req.phone}
 

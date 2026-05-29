@@ -665,13 +665,13 @@ def save_patient_to_db(name: str, age: int, phone: str = "", gender: str = "unkn
 
 
 def _send_external_notification(doctors: list, approval_id: str, patient_name: str, symptoms: str, risk_level: str, specialty: str):
-    """Send SMS alerts to doctors for URGENT/EMERGENCY cases.
-    Integrates with MSG91 when configured.
-    Falls back to logging when credentials are not set."""
+    """Send SMS alerts to doctors for URGENT/EMERGENCY cases via MSG91.
+    Requires MSG91_AUTH_KEY, MSG91_SENDER_ID, and MSG91_ALERT_TEMPLATE_ID to be set.
+    Falls back to logging when not configured."""
     import os
     import httpx
     msg91_auth_key = os.getenv("MSG91_AUTH_KEY", "")
-    msg91_sender_id = os.getenv("MSG91_SENDER_ID", "MEDVRA")
+    msg91_sender_id = os.getenv("MSG91_SENDER_ID", "")
     msg91_alert_template_id = os.getenv("MSG91_ALERT_TEMPLATE_ID", "")
 
     emoji = "🚨" if risk_level == "EMERGENCY" else "⚠️"
@@ -684,8 +684,8 @@ def _send_external_notification(doctors: list, approval_id: str, patient_name: s
         f"Please review on your Medivora Doctor Dashboard immediately."
     )
 
-    if msg91_auth_key and msg91_alert_template_id:
-        for doc in doctors[:3]:  # Notify up to 3 doctors
+    if msg91_auth_key and msg91_alert_template_id and msg91_alert_template_id != "REPLACE_ME":
+        for doc in doctors[:3]:
             phone = doc.get("phone", "")
             if not phone:
                 continue
@@ -693,7 +693,7 @@ def _send_external_notification(doctors: list, approval_id: str, patient_name: s
                 payload = {
                     "flow_id": msg91_alert_template_id,
                     "sender": msg91_sender_id,
-                    "mobiles": phone,
+                    "mobiles": phone.lstrip("+"),
                     "RISK": risk_level,
                     "PATIENT": patient_name or "Anonymous",
                     "SYMPTOMS": symptoms[:80],
@@ -707,13 +707,13 @@ def _send_external_notification(doctors: list, approval_id: str, patient_name: s
                     timeout=10,
                 )
                 if resp.status_code == 200:
-                    logger.info(f"SMS alert sent to doctor {doc.get('id')} for {approval_id}")
+                    logger.info(f"MSG91 alert sent to doctor {doc.get('id')} for {approval_id}")
                 else:
-                    logger.warning(f"MSG91 SMS failed for doctor {doc.get('id')}: {resp.status_code} {resp.text}")
+                    logger.warning(f"MSG91 alert failed for doctor {doc.get('id')}: {resp.status_code} {resp.text}")
             except Exception as e:
-                logger.warning(f"SMS notification failed for {doc.get('id')}: {e}")
+                logger.warning(f"MSG91 alert failed for doctor {doc.get('id')}: {e}")
     else:
-        logger.info(f"External notification skipped (MSG91 not configured). {risk_level} alert for {approval_id}: {msg_body[:80]}")
+        logger.info(f"Doctor alert skipped (MSG91_ALERT_TEMPLATE_ID not configured). {risk_level} alert for {approval_id}: {msg_body[:80]}")
 
 
 def create_approval_and_notify(

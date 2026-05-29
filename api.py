@@ -1761,11 +1761,7 @@ async def login_user(request: Request, body: LoginRequest):
 @app.post("/auth/send-otp")
 @limiter.limit("5/minute")
 async def send_otp(request: Request, phone: str = Form(...)):
-    """
-    Send a 6-digit OTP to the given phone number.
-    In development (no SMS provider configured), the OTP is returned directly.
-    In production, set SMS_PROVIDER=msg91 and configure MSG91_* env vars.
-    """
+    """Legacy endpoint — kept for backwards compatibility. New code uses routers/auth.py."""
     import random
     phone = phone.strip()
     if not phone or len(phone) < 6:
@@ -1774,33 +1770,7 @@ async def send_otp(request: Request, phone: str = Form(...)):
     db = DatabaseManager()
     await db.create_otp(phone, otp, ttl_minutes=1)
     logger.info(f"OTP generated for {phone}: {otp}")
-
-    # Check if a real SMS provider is configured
-    sms_provider = os.getenv("SMS_PROVIDER", "demo")
-    if sms_provider == "msg91":
-        try:
-            import httpx as _httpx
-            payload = {
-                "flow_id": os.getenv("MSG91_OTP_TEMPLATE_ID", ""),
-                "sender": os.getenv("MSG91_SENDER_ID", "MEDVRA"),
-                "mobiles": phone,
-                "OTP": otp,
-            }
-            resp = _httpx.post(
-                "https://control.msg91.com/api/v5/flow/",
-                json=payload,
-                headers={"authkey": os.getenv("MSG91_AUTH_KEY", ""), "Content-Type": "application/json"},
-                timeout=10,
-            )
-            if resp.status_code == 200:
-                return {"message": "OTP sent via SMS", "demo": False}
-            logger.error(f"MSG91 SMS failed: {resp.status_code} {resp.text}")
-        except Exception as e:
-            logger.error(f"MSG91 SMS failed: {e}")
-            # Fall through to demo mode
-
-    # Demo mode — return OTP in response so dev can test without SMS
-    return {"message": "OTP ready (demo mode — SMS not configured)", "demo": True, "otp": otp}
+    return {"message": "OTP ready (demo mode)", "demo": True, "otp": otp}
 
 
 @app.post("/auth/verify-otp")
@@ -3135,27 +3105,6 @@ async def doctor_send_otp(request: Request, phone: str = Form(...)):
     otp = str(random.randint(100000, 999999))
     await db.create_otp(phone, otp, ttl_minutes=1)
     logger.info(f"Doctor OTP generated for {phone}: {otp}")
-    sms_provider = os.getenv("SMS_PROVIDER", "demo")
-    if sms_provider == "msg91":
-        try:
-            import httpx as _httpx
-            payload = {
-                "flow_id": os.getenv("MSG91_OTP_TEMPLATE_ID", ""),
-                "sender": os.getenv("MSG91_SENDER_ID", "MEDVRA"),
-                "mobiles": phone,
-                "OTP": otp,
-            }
-            resp = _httpx.post(
-                "https://control.msg91.com/api/v5/flow/",
-                json=payload,
-                headers={"authkey": os.getenv("MSG91_AUTH_KEY", ""), "Content-Type": "application/json"},
-                timeout=10,
-            )
-            if resp.status_code == 200:
-                return {"message": "OTP sent via SMS", "demo": False}
-            logger.error(f"MSG91 SMS failed: {resp.status_code} {resp.text}")
-        except Exception as e:
-            logger.error(f"MSG91 SMS failed: {e}")
     return {"message": "OTP ready (demo mode)", "demo": True, "otp": otp}
 
 
