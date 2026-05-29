@@ -643,14 +643,13 @@ def save_patient_to_db(name: str, age: int, phone: str = "", gender: str = "unkn
 
 
 def _send_external_notification(doctors: list, approval_id: str, patient_name: str, symptoms: str, risk_level: str, specialty: str):
-    """Send SMS/WhatsApp alerts to doctors for URGENT/EMERGENCY cases.
-    Integrates with Twilio / WhatsApp Business API when configured.
-    Falls back to logging when credentials are not set."""
-    import os
-    twilio_sid = os.getenv("TWILIO_ACCOUNT_SID", "")
-    twilio_token = os.getenv("TWILIO_AUTH_TOKEN", "")
-    twilio_from = os.getenv("TWILIO_FROM_NUMBER", "")
-    whatsapp_from = os.getenv("TWILIO_WHATSAPP_FROM", "")  # e.g. "whatsapp:+14155238886"
+    """Send SMS alerts to doctors for URGENT/EMERGENCY cases via MSG91.
+    Requires MSG91_AUTH_KEY, MSG91_SENDER_ID, and MSG91_ALERT_TEMPLATE_ID to be set.
+    Falls back to logging when not configured."""
+    import os, httpx
+    auth_key      = os.getenv("MSG91_AUTH_KEY", "")
+    sender_id     = os.getenv("MSG91_SENDER_ID", "")
+    alert_flow_id = os.getenv("MSG91_ALERT_TEMPLATE_ID", "")
 
     emoji = "🚨" if risk_level == "EMERGENCY" else "⚠️"
     msg_body = (
@@ -662,38 +661,29 @@ def _send_external_notification(doctors: list, approval_id: str, patient_name: s
         f"Please review on your Medivora Doctor Dashboard immediately."
     )
 
-    if twilio_sid and twilio_token:
-        try:
-            from twilio.rest import Client
-            client = Client(twilio_sid, twilio_token)
-            for doc in doctors[:3]:  # Notify up to 3 doctors
-                phone = doc.get("phone", "")
-                if not phone:
-                    continue
-                # WhatsApp notification (preferred)
-                if whatsapp_from:
-                    try:
-                        client.messages.create(
-                            body=msg_body,
-                            from_=whatsapp_from,
-                            to=f"whatsapp:{phone}" if not phone.startswith("whatsapp:") else phone,
-                        )
-                        logger.info(f"WhatsApp alert sent to doctor {doc.get('id')} for {approval_id}")
-                    except Exception as we:
-                        logger.warning(f"WhatsApp notification failed for {doc.get('id')}: {we}")
-                # SMS fallback
-                if twilio_from:
-                    try:
-                        client.messages.create(body=msg_body, from_=twilio_from, to=phone)
-                        logger.info(f"SMS alert sent to doctor {doc.get('id')} for {approval_id}")
-                    except Exception as se:
-                        logger.warning(f"SMS notification failed for {doc.get('id')}: {se}")
-        except ImportError:
-            logger.warning("Twilio SDK not installed. Set 'pip install twilio' for SMS/WhatsApp notifications.")
-        except Exception as e:
-            logger.error(f"External notification error: {e}")
+    if auth_key and alert_flow_id and alert_flow_id != "REPLACE_ME":
+        for doc in doctors[:3]:
+            phone = doc.get("phone", "")
+            if not phone:
+                continue
+            mobile = phone.lstrip("+")
+            try:
+                resp = httpx.post(
+                    "https://control.msg91.com/api/v5/flow/",
+                    json={
+                        "flow_id": alert_flow_id,
+                        "sender":  sender_id,
+                        "mobiles": mobile,
+                        "ALERT":   msg_body[:160],
+                    },
+                    headers={"authkey": auth_key, "Content-Type": "application/json"},
+                    timeout=10,
+                )
+                logger.info(f"MSG91 alert sent to doctor {doc.get('id')} for {approval_id}: {resp.status_code}")
+            except Exception as e:
+                logger.warning(f"MSG91 alert failed for doctor {doc.get('id')}: {e}")
     else:
-        logger.info(f"External notification skipped (Twilio not configured). {risk_level} alert for {approval_id}: {msg_body[:80]}")
+        logger.info(f"Doctor alert skipped (MSG91_ALERT_TEMPLATE_ID not configured). {risk_level} alert for {approval_id}: {msg_body[:80]}")
 
 
 def create_approval_and_notify(
