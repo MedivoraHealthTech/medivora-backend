@@ -5315,7 +5315,6 @@ async def verify_payment(
 @limiter.limit("20/minute")
 async def validate_promocode(
     request: Request,
-    current_user: Dict = Depends(get_current_user),
 ):
     """Validate a promo code and return the discount details."""
     body = await request.json()
