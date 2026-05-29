@@ -8,12 +8,14 @@ import string
 from datetime import datetime, timezone
 
 
+
 def _parse_ts(ts) -> datetime:
     """Parse a Supabase timestamp — handles variable microsecond digits (Python 3.10 compat)."""
     if not isinstance(ts, str):
         return ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
     ts = _re.sub(r'\.(\d+)', lambda m: '.' + m.group(1)[:6].ljust(6, '0'), ts)
     return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+
 
 import httpx
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
@@ -295,6 +297,7 @@ async def send_otp(req: SendOTPRequest):
     if not settings.MSG91_AUTH_KEY or not settings.MSG91_OTP_TEMPLATE_ID:
         raise HTTPException(status_code=500, detail="MSG91 not configured on server.")
     await _send_via_msg91_flow(req.phone, otp)
+
     return {"message": "OTP sent successfully", "phone": req.phone}
 
 

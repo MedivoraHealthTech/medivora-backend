@@ -266,13 +266,24 @@ def assess_risk(symptoms_text: str) -> dict:
             }
 
     # ── General EMERGENCY flags ──
+    # NOTE: 'chest pain' alone is NOT an emergency — it's URGENT.
+    # Only clear-cut life-threatening presentations trigger EMERGENCY.
     emergency_keywords = [
-        'chest pain', 'difficulty breathing', 'unconscious', 'severe bleeding',
-        'heart attack', 'stroke', 'seizure', 'poisoning',
+        'heart attack', 'cardiac arrest', 'crushing chest',
+        'difficulty breathing', 'cannot breathe', 'stopped breathing',
+        'unconscious', 'not responding',
+        'severe bleeding', 'stroke',
+        'seizure', 'convulsion', 'poisoning', 'overdose',
+        'anaphylaxis', 'throat swelling',
     ]
     if any(kw in text_lower for kw in emergency_keywords):
         _write_triage_from_risk("EMERGENCY")
         return {"status": "success", "risk_level": "EMERGENCY", "action": "Call 108 immediately"}
+
+    # ── Chest pain alone → URGENT (needs assessment, not instant 108) ──
+    if 'chest pain' in text_lower or 'chest tightness' in text_lower:
+        _write_triage_from_risk("URGENT")
+        return {"status": "success", "risk_level": "URGENT", "action": "See cardiologist urgently — assess severity first"}
 
     # ── General URGENT flags ──
     urgent_keywords = ['high fever', 'blood', 'severe', 'breathing']
@@ -419,6 +430,15 @@ def determine_specialty(symptoms_text: str, diagnosis: str = "") -> dict:
         "reason": f"Matched {best_specialty} based on symptom/diagnosis keywords",
         "all_matches": {k: v for k, v in sorted(scores.items(), key=lambda x: -x[1])},
     }
+
+
+def assess_and_route(symptoms_text: str, diagnosis: str = "") -> dict:
+    """Combined risk assessment + specialty determination in a single call.
+    Replaces calling assess_risk and determine_specialty separately — saves one API round-trip.
+    Returns risk_level, action, specialty, and confidence in one response."""
+    risk = assess_risk(symptoms_text)
+    specialty = determine_specialty(symptoms_text, diagnosis)
+    return {**risk, **specialty}
 
 
 def get_nearby_facilities(location: str, risk_level: str) -> dict:
@@ -628,6 +648,7 @@ def save_patient_to_db(name: str, age: int, phone: str = "", gender: str = "unkn
     """Save a patient to the database and return patient_id."""
     try:
         from models import PatientProfile
+        import threading as _threading
         patient_id = f"patient_{uuid.uuid4().hex[:10]}"
         now = datetime.now()
         patient = PatientProfile(
@@ -635,7 +656,8 @@ def save_patient_to_db(name: str, age: int, phone: str = "", gender: str = "unkn
             address="", medical_history=[], allergies=[], current_medications=[],
             emergency_contact="", created_at=now, updated_at=now,
         )
-        _run_async(_db.save_patient(patient))
+        # Fire-and-forget — patient_id is already generated; no need to block on the write
+        _threading.Thread(target=lambda: _run_async(_db.save_patient(patient)), daemon=True).start()
         return {"status": "success", "patient_id": patient_id, "name": name}
     except Exception as e:
         logger.error(f"save_patient_to_db failed: {e}")
@@ -646,10 +668,11 @@ def _send_external_notification(doctors: list, approval_id: str, patient_name: s
     """Send SMS alerts to doctors for URGENT/EMERGENCY cases via MSG91.
     Requires MSG91_AUTH_KEY, MSG91_SENDER_ID, and MSG91_ALERT_TEMPLATE_ID to be set.
     Falls back to logging when not configured."""
-    import os, httpx
-    auth_key      = os.getenv("MSG91_AUTH_KEY", "")
-    sender_id     = os.getenv("MSG91_SENDER_ID", "")
-    alert_flow_id = os.getenv("MSG91_ALERT_TEMPLATE_ID", "")
+    import os
+    import httpx
+    msg91_auth_key = os.getenv("MSG91_AUTH_KEY", "")
+    msg91_sender_id = os.getenv("MSG91_SENDER_ID", "")
+    msg91_alert_template_id = os.getenv("MSG91_ALERT_TEMPLATE_ID", "")
 
     emoji = "🚨" if risk_level == "EMERGENCY" else "⚠️"
     msg_body = (
@@ -661,25 +684,32 @@ def _send_external_notification(doctors: list, approval_id: str, patient_name: s
         f"Please review on your Medivora Doctor Dashboard immediately."
     )
 
-    if auth_key and alert_flow_id and alert_flow_id != "REPLACE_ME":
+    if msg91_auth_key and msg91_alert_template_id and msg91_alert_template_id != "REPLACE_ME":
         for doc in doctors[:3]:
             phone = doc.get("phone", "")
             if not phone:
                 continue
-            mobile = phone.lstrip("+")
             try:
+                payload = {
+                    "flow_id": msg91_alert_template_id,
+                    "sender": msg91_sender_id,
+                    "mobiles": phone.lstrip("+"),
+                    "RISK": risk_level,
+                    "PATIENT": patient_name or "Anonymous",
+                    "SYMPTOMS": symptoms[:80],
+                    "SPECIALTY": specialty,
+                    "APPROVAL": approval_id,
+                }
                 resp = httpx.post(
                     "https://control.msg91.com/api/v5/flow/",
-                    json={
-                        "flow_id": alert_flow_id,
-                        "sender":  sender_id,
-                        "mobiles": mobile,
-                        "ALERT":   msg_body[:160],
-                    },
-                    headers={"authkey": auth_key, "Content-Type": "application/json"},
+                    json=payload,
+                    headers={"authkey": msg91_auth_key, "Content-Type": "application/json"},
                     timeout=10,
                 )
-                logger.info(f"MSG91 alert sent to doctor {doc.get('id')} for {approval_id}: {resp.status_code}")
+                if resp.status_code == 200:
+                    logger.info(f"MSG91 alert sent to doctor {doc.get('id')} for {approval_id}")
+                else:
+                    logger.warning(f"MSG91 alert failed for doctor {doc.get('id')}: {resp.status_code} {resp.text}")
             except Exception as e:
                 logger.warning(f"MSG91 alert failed for doctor {doc.get('id')}: {e}")
     else:
@@ -849,37 +879,45 @@ def create_approval_and_notify(
             "priority": priority,
             "created_at": datetime.now().isoformat(),
         }
-        _run_async(_db.save_approval_request(approval_request))
-
-        # Save anonymous patient so JOIN works
-        from models import PatientProfile
-        now = datetime.now()
-        anon = PatientProfile(
-            id=patient_id, name=patient_name or "Anonymous User", age=25,
-            gender="unknown", phone="", address="", medical_history=[],
-            allergies=[], current_medications=[], emergency_contact="",
-            created_at=now, updated_at=now,
-        )
-        try:
-            _run_async(_db.save_patient(anon))
-        except Exception:
-            pass
-
-        # Notify doctors matching the determined specialty
+        # Fetch doctors synchronously — we need the count for the return value
+        # and must fire notifications before this function returns.
         doctors = _run_async(_db.get_available_doctors(determined_specialty))
         notif_msg = f"Naya prescription approval ({determined_specialty}): {patient_name or 'Anonymous'}, Symptoms: {symptoms[:80]}, Risk: {risk_level}"
 
-        if doctors:
-            _run_async(_db.assign_doctor_to_approval(approval_id, doctors[0]["id"]))
-            for doc in doctors:
+        import threading as _threading
+        from models import PatientProfile as _PP
+
+        def _bg_writes():
+            """Fire-and-forget: save approval + patient + notifications in background."""
+            try:
+                _run_async(_db.save_approval_request(approval_request))
+            except Exception:
+                pass
+            try:
+                now2 = datetime.now()
+                anon = _PP(
+                    id=patient_id, name=patient_name or "Anonymous User", age=25,
+                    gender="unknown", phone="", address="", medical_history=[],
+                    allergies=[], current_medications=[], emergency_contact="",
+                    created_at=now2, updated_at=now2,
+                )
+                _run_async(_db.save_patient(anon))
+            except Exception:
+                pass
+            if doctors:
                 try:
-                    _run_async(_db.save_notification(doc["id"], approval_id, notif_msg, priority))
+                    _run_async(_db.assign_doctor_to_approval(approval_id, doctors[0]["id"]))
                 except Exception:
                     pass
+                for doc in doctors:
+                    try:
+                        _run_async(_db.save_notification(doc["id"], approval_id, notif_msg, priority))
+                    except Exception:
+                        pass
+                if risk_level in ("EMERGENCY", "URGENT"):
+                    _send_external_notification(doctors, approval_id, patient_name, symptoms, risk_level, determined_specialty)
 
-            # ── External notification for URGENT/EMERGENCY cases ──
-            if risk_level in ("EMERGENCY", "URGENT"):
-                _send_external_notification(doctors, approval_id, patient_name, symptoms, risk_level, determined_specialty)
+        _threading.Thread(target=_bg_writes, daemon=True).start()
 
         result = {
             "status": "success",
