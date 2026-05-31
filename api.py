@@ -5573,6 +5573,52 @@ async def payment_callback(request: Request):
         return RedirectResponse(f"{frontend_url}/payment?error=booking_failed", status_code=303)
 
 
+# ─── Patient Waitlist ─────────────────────────────────────────────────────────
+
+class PatientWaitlistRequest(BaseModel):
+    name: str
+    phone: str
+    email: Optional[str] = None
+
+@app.post("/waitlist/patient")
+@limiter.limit("10/minute")
+async def join_patient_waitlist(request: Request, body: PatientWaitlistRequest):
+    """Register a patient's interest via the landing-page waitlist form."""
+    name  = body.name.strip()
+    phone = body.phone.strip()
+    email = (body.email or "").strip() or None
+    if not name:
+        raise HTTPException(status_code=422, detail="Name is required.")
+    if not phone:
+        raise HTTPException(status_code=422, detail="Phone number is required.")
+    try:
+        db_client = DatabaseManager().client
+        result = db_client.table("patient_waitlist").insert({
+            "name": name, "phone": phone, "email": email
+        }).execute()
+        entry = result.data[0] if result.data else {}
+        return {"status": "ok", "id": entry.get("id")}
+    except Exception as e:
+        logger.error(f"Patient waitlist insert failed: {e}")
+        raise HTTPException(status_code=500, detail="Could not save your details. Please try again.")
+
+
+@app.get("/admin/waitlist/patients")
+@limiter.limit("30/minute")
+async def admin_get_patient_waitlist(
+    request: Request,
+    current_admin: Dict = Depends(require_admin),
+):
+    """Admin: list all patient waitlist entries."""
+    try:
+        db_client = DatabaseManager().client
+        result = db_client.table("patient_waitlist").select("*").order("created_at", desc=True).execute()
+        return {"entries": result.data or [], "count": len(result.data or [])}
+    except Exception as e:
+        logger.error(f"Patient waitlist fetch failed: {e}")
+        raise HTTPException(status_code=500, detail="Could not fetch waitlist.")
+
+
 # ─── Doctor Waitlist ──────────────────────────────────────────────────────────
 
 class DoctorWaitlistRequest(BaseModel):
