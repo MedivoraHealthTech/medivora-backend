@@ -369,7 +369,7 @@ async def verify_otp(req: VerifyOTPRequest):
             password_hash=placeholder_hash,
             user_type="doctor",
         )
-        doctor_row = db.create_doctor(profile_id=profile["id"])
+        doctor_row = db.create_doctor(profile_id=profile["id"], available_status="inactive")
         # Auto-create a pending join request so admin sees this doctor immediately
         try:
             db.client.table("doctor_join_requests").insert({
