@@ -165,6 +165,18 @@ class SupabaseDB:
 
     # ── OTP TOKENS ────────────────────────────────────────────────────
 
+    def get_latest_otp(self, phone: str) -> Dict | None:
+        """Return the most recently created OTP for a phone (used or not)."""
+        result = (
+            self.client.table("otp_tokens")
+            .select("*")
+            .eq("phone", phone)
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        return result.data[0] if result.data else None
+
     def create_otp(self, phone: str, otp_code: str, ttl_minutes: int = 1) -> Dict:
         expires_at = datetime.now(timezone.utc) + timedelta(minutes=ttl_minutes)
         data = {

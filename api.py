@@ -1761,11 +1761,7 @@ async def login_user(request: Request, body: LoginRequest):
 @app.post("/auth/send-otp")
 @limiter.limit("5/minute")
 async def send_otp(request: Request, phone: str = Form(...)):
-    """
-    Send a 6-digit OTP to the given phone number.
-    In development (no SMS provider configured), the OTP is returned directly.
-    In production, set SMS_PROVIDER=msg91 and configure MSG91_* env vars.
-    """
+    """Legacy endpoint — kept for backwards compatibility. New code uses routers/auth.py."""
     import random
     phone = phone.strip()
     if not phone or len(phone) < 6:
@@ -1774,33 +1770,7 @@ async def send_otp(request: Request, phone: str = Form(...)):
     db = DatabaseManager()
     await db.create_otp(phone, otp, ttl_minutes=1)
     logger.info(f"OTP generated for {phone}: {otp}")
-
-    # Check if a real SMS provider is configured
-    sms_provider = os.getenv("SMS_PROVIDER", "demo")
-    if sms_provider == "msg91":
-        try:
-            import httpx as _httpx
-            payload = {
-                "flow_id": os.getenv("MSG91_OTP_TEMPLATE_ID", ""),
-                "sender": os.getenv("MSG91_SENDER_ID", "MEDVRA"),
-                "mobiles": phone,
-                "OTP": otp,
-            }
-            resp = _httpx.post(
-                "https://control.msg91.com/api/v5/flow/",
-                json=payload,
-                headers={"authkey": os.getenv("MSG91_AUTH_KEY", ""), "Content-Type": "application/json"},
-                timeout=10,
-            )
-            if resp.status_code == 200:
-                return {"message": "OTP sent via SMS", "demo": False}
-            logger.error(f"MSG91 SMS failed: {resp.status_code} {resp.text}")
-        except Exception as e:
-            logger.error(f"MSG91 SMS failed: {e}")
-            # Fall through to demo mode
-
-    # Demo mode — return OTP in response so dev can test without SMS
-    return {"message": "OTP ready (demo mode — SMS not configured)", "demo": True, "otp": otp}
+    return {"message": "OTP ready (demo mode)", "demo": True, "otp": otp}
 
 
 @app.post("/auth/verify-otp")
@@ -3135,27 +3105,6 @@ async def doctor_send_otp(request: Request, phone: str = Form(...)):
     otp = str(random.randint(100000, 999999))
     await db.create_otp(phone, otp, ttl_minutes=1)
     logger.info(f"Doctor OTP generated for {phone}: {otp}")
-    sms_provider = os.getenv("SMS_PROVIDER", "demo")
-    if sms_provider == "msg91":
-        try:
-            import httpx as _httpx
-            payload = {
-                "flow_id": os.getenv("MSG91_OTP_TEMPLATE_ID", ""),
-                "sender": os.getenv("MSG91_SENDER_ID", "MEDVRA"),
-                "mobiles": phone,
-                "OTP": otp,
-            }
-            resp = _httpx.post(
-                "https://control.msg91.com/api/v5/flow/",
-                json=payload,
-                headers={"authkey": os.getenv("MSG91_AUTH_KEY", ""), "Content-Type": "application/json"},
-                timeout=10,
-            )
-            if resp.status_code == 200:
-                return {"message": "OTP sent via SMS", "demo": False}
-            logger.error(f"MSG91 SMS failed: {resp.status_code} {resp.text}")
-        except Exception as e:
-            logger.error(f"MSG91 SMS failed: {e}")
     return {"message": "OTP ready (demo mode)", "demo": True, "otp": otp}
 
 
@@ -5366,7 +5315,6 @@ async def verify_payment(
 @limiter.limit("20/minute")
 async def validate_promocode(
     request: Request,
-    current_user: Dict = Depends(get_current_user),
 ):
     """Validate a promo code and return the discount details."""
     body = await request.json()
@@ -5623,6 +5571,52 @@ async def payment_callback(request: Request):
     except Exception as e:
         logger.error(f"Consultation creation after callback failed: {e}")
         return RedirectResponse(f"{frontend_url}/payment?error=booking_failed", status_code=303)
+
+
+# ─── Patient Waitlist ─────────────────────────────────────────────────────────
+
+class PatientWaitlistRequest(BaseModel):
+    name: str
+    phone: str
+    email: Optional[str] = None
+
+@app.post("/waitlist/patient")
+@limiter.limit("10/minute")
+async def join_patient_waitlist(request: Request, body: PatientWaitlistRequest):
+    """Register a patient's interest via the landing-page waitlist form."""
+    name  = body.name.strip()
+    phone = body.phone.strip()
+    email = (body.email or "").strip() or None
+    if not name:
+        raise HTTPException(status_code=422, detail="Name is required.")
+    if not phone:
+        raise HTTPException(status_code=422, detail="Phone number is required.")
+    try:
+        db_client = DatabaseManager().client
+        result = db_client.table("patient_waitlist").insert({
+            "name": name, "phone": phone, "email": email
+        }).execute()
+        entry = result.data[0] if result.data else {}
+        return {"status": "ok", "id": entry.get("id")}
+    except Exception as e:
+        logger.error(f"Patient waitlist insert failed: {e}")
+        raise HTTPException(status_code=500, detail="Could not save your details. Please try again.")
+
+
+@app.get("/admin/waitlist/patients")
+@limiter.limit("30/minute")
+async def admin_get_patient_waitlist(
+    request: Request,
+    current_admin: Dict = Depends(require_admin),
+):
+    """Admin: list all patient waitlist entries."""
+    try:
+        db_client = DatabaseManager().client
+        result = db_client.table("patient_waitlist").select("*").order("created_at", desc=True).execute()
+        return {"entries": result.data or [], "count": len(result.data or [])}
+    except Exception as e:
+        logger.error(f"Patient waitlist fetch failed: {e}")
+        raise HTTPException(status_code=500, detail="Could not fetch waitlist.")
 
 
 # ─── Doctor Waitlist ──────────────────────────────────────────────────────────
