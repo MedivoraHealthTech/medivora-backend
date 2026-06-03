@@ -6,6 +6,16 @@ FastAPI backend with Supabase (Postgres) database.
 Run: uvicorn main:app --reload --port 8000
 """
 
+import os
+from dotenv import load_dotenv
+load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
+
+import newrelic.agent
+newrelic.agent.initialize(
+    os.path.join(os.path.dirname(__file__), "newrelic.ini"),
+    os.getenv("NEW_RELIC_ENVIRONMENT", "production"),
+)
+
 from contextlib import asynccontextmanager
 import logging
 import uuid as _uuid
