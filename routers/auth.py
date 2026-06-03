@@ -344,10 +344,9 @@ async def send_otp(req: SendOTPRequest):
 
 @router.post("/verify-otp")
 async def verify_otp(req: VerifyOTPRequest):
-    """Verify OTP and auto-create/login the user."""
+    """Doctor OTP verify. Auto-creates a doctor profile + doctors row on first login."""
     db = get_db()
 
-    # In mock mode, accept any OTP
     if settings.OTP_MOCK_MODE:
         is_valid = True
     else:
@@ -356,13 +355,27 @@ async def verify_otp(req: VerifyOTPRequest):
     if not is_valid:
         raise HTTPException(status_code=400, detail="Invalid or expired OTP.")
 
-    # Doctor OTP — only works for existing doctor/admin profiles; never auto-creates
     existing = db.get_profile_by_phone(req.phone)
-    if not existing:
-        raise HTTPException(status_code=404, detail="No doctor account found for this phone number. Please contact admin.")
-    profile = existing
+    is_new_user = existing is None
 
-    # Update phone_verified
+    if is_new_user:
+        placeholder_hash = hash_password("otp_verified_no_password")
+        name = (req.name or "").strip()
+        name_parts = name.split(" ", 1) if name else ["", ""]
+        profile = db.create_profile(
+            phone=req.phone,
+            first_name=name_parts[0],
+            last_name=name_parts[1] if len(name_parts) > 1 else "",
+            password_hash=placeholder_hash,
+            user_type="doctor",
+        )
+        db.create_doctor(profile_id=profile["id"])
+    else:
+        profile = existing
+
+    if profile.get("status", "active") != "active":
+        raise HTTPException(status_code=403, detail=f"Account is {profile['status']}.")
+
     db.update_profile(profile["id"], {"phone_verified": True})
     db.update_last_login(profile["id"])
 
@@ -374,7 +387,7 @@ async def verify_otp(req: VerifyOTPRequest):
         "token": token,
         "user_type": profile["user_type"],
         "full_name": _name(profile.get("first_name"), profile.get("last_name")),
-        "is_new_user": False,
+        "is_new_user": is_new_user,
     }
 
 
