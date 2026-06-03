@@ -136,6 +136,11 @@ async def verify_patient_otp(req: _PatientOTPVerifyRequest):
         db.create_patient(profile_id=profile["id"])
     else:
         profile = existing
+        # Allow doctor profiles to also log in as patients.
+        # Ensure a patients row exists for dual-role accounts.
+        patient_row = db.get_patient_by_profile_id(profile["id"])
+        if patient_row is None:
+            db.create_patient(profile_id=profile["id"])
 
     if profile.get("status", "active") != "active":
         raise HTTPException(status_code=403, detail=f"Account is {profile['status']}.")
