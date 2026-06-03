@@ -136,11 +136,6 @@ async def verify_patient_otp(req: _PatientOTPVerifyRequest):
         db.create_patient(profile_id=profile["id"])
     else:
         profile = existing
-        # Allow doctor profiles to also log in as patients.
-        # Ensure a patients row exists for dual-role accounts.
-        patient_row = db.get_patient_by_profile_id(profile["id"])
-        if patient_row is None:
-            db.create_patient(profile_id=profile["id"])
 
     if profile.get("status", "active") != "active":
         raise HTTPException(status_code=403, detail=f"Account is {profile['status']}.")
@@ -155,6 +150,45 @@ async def verify_patient_otp(req: _PatientOTPVerifyRequest):
         "user_type":  "patient",
         "full_name":  _name(profile.get("first_name"), profile.get("last_name")),
         "is_new_user": is_new_user,
+    }
+
+
+# ── POST /auth/verify-dual-otp ───────────────────────────────────────
+# New endpoint for dual-role accounts (e.g. a doctor who also uses the
+# patient flow). Verifies OTP and always returns a patient-scoped JWT,
+# creating a patients row if one doesn't exist yet for this profile.
+
+@router.post("/verify-dual-otp")
+async def verify_dual_otp(req: _PatientOTPVerifyRequest):
+    """Verify OTP for a dual-role account and return a patient JWT.
+    Works for any profile (patient or doctor). Does NOT touch verify-patient-otp."""
+    db = get_db()
+
+    if not db.verify_otp(phone=req.phone, otp_code=req.otp):
+        raise HTTPException(status_code=400, detail="Invalid or expired OTP.")
+
+    profile = db.get_profile_by_phone(req.phone)
+    if not profile:
+        raise HTTPException(status_code=404, detail="No account found for this phone number.")
+
+    if profile.get("status", "active") != "active":
+        raise HTTPException(status_code=403, detail=f"Account is {profile['status']}.")
+
+    # Ensure a patients row exists (creates one if this is a doctor-only account)
+    patient_row = db.get_patient_by_profile_id(profile["id"])
+    if patient_row is None:
+        db.create_patient(profile_id=profile["id"])
+
+    db.update_profile(profile["id"], {"phone_verified": True})
+    db.update_last_login(profile["id"])
+
+    token = create_token(user_id=str(profile["id"]), role="patient")
+    return {
+        "token":     token,
+        "user_id":   str(profile["id"]),
+        "user_type": "patient",
+        "full_name": _name(profile.get("first_name"), profile.get("last_name")),
+        "is_new_user": False,
     }
 
 
