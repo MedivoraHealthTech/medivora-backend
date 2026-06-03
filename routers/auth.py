@@ -356,26 +356,11 @@ async def verify_otp(req: VerifyOTPRequest):
     if not is_valid:
         raise HTTPException(status_code=400, detail="Invalid or expired OTP.")
 
-    # Check if user already exists
+    # Doctor OTP — only works for existing doctor/admin profiles; never auto-creates
     existing = db.get_profile_by_phone(req.phone)
-    is_new_user = existing is None
-
-    if is_new_user:
-        # New user — create profile + patient record
-        name = (req.name or "").strip()
-        _otp_parts = name.split(" ", 1) if name else ["", ""]
-        # Create with a placeholder password (user can set real one later)
-        placeholder_hash = hash_password("otp_verified_no_password")
-        profile = db.create_profile(
-            phone=req.phone,
-            first_name=_otp_parts[0],
-            last_name=_otp_parts[1] if len(_otp_parts) > 1 else "",
-            password_hash=placeholder_hash,
-            user_type="patient",
-        )
-        db.create_patient(profile_id=profile["id"])
-    else:
-        profile = existing
+    if not existing:
+        raise HTTPException(status_code=404, detail="No doctor account found for this phone number. Please contact admin.")
+    profile = existing
 
     # Update phone_verified
     db.update_profile(profile["id"], {"phone_verified": True})
@@ -389,7 +374,7 @@ async def verify_otp(req: VerifyOTPRequest):
         "token": token,
         "user_type": profile["user_type"],
         "full_name": _name(profile.get("first_name"), profile.get("last_name")),
-        "is_new_user": is_new_user,
+        "is_new_user": False,
     }
 
 
