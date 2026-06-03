@@ -369,7 +369,25 @@ async def verify_otp(req: VerifyOTPRequest):
             password_hash=placeholder_hash,
             user_type="doctor",
         )
-        db.create_doctor(profile_id=profile["id"])
+        doctor_row = db.create_doctor(profile_id=profile["id"])
+        # Auto-create a pending join request so admin sees this doctor immediately
+        try:
+            db.client.table("doctor_join_requests").insert({
+                "doctor_id":        doctor_row["id"] if doctor_row else None,
+                "first_name":       name_parts[0],
+                "last_name":        name_parts[1] if len(name_parts) > 1 else "",
+                "phone":            req.phone,
+                "email":            "",
+                "specialties":      "general_medicine",
+                "experience_years": 0,
+                "medical_college":  "",
+                "nmc_number":       "",
+                "clinic_name":      "",
+                "clinic_address":   "",
+                "status":           "pending",
+            }).execute()
+        except Exception:
+            pass  # join request creation is non-blocking
     else:
         profile = existing
 
