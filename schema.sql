@@ -114,7 +114,7 @@ CREATE TABLE doctors (
     consultation_fee      DECIMAL(10,2),
 
     -- Availability
-    available_status      VARCHAR(50) DEFAULT 'offline'
+    available_status      VARCHAR(50) DEFAULT 'inactive'
                             CHECK (available_status IN ('available', 'busy', 'offline', 'on_leave', 'suspended', 'inactive')),
     available_slots       JSONB DEFAULT '[]'::jsonb,
 
