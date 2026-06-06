@@ -2609,26 +2609,34 @@ async def doctor_submit_approval(current_doctor: Dict = Depends(require_doctor))
         "notes":            "",
     }
 
-    # If there is an existing draft or changes_requested row, update it to submitted
+    # Find any existing non-terminal row (supports pre-migration 'pending' too)
     existing_draft = db.client.table("doctor_join_requests") \
         .select("id") \
         .eq("doctor_id", doctor_id) \
-        .in_("status", ["draft", "changes_requested"]) \
+        .in_("status", ["draft", "changes_requested", "pending"]) \
         .limit(1).execute()
 
     if existing_draft.data:
         req_id = existing_draft.data[0]["id"]
-        db.client.table("doctor_join_requests").update({
-            **profile_data,
-            "status":      "submitted",
-            "review_note": None,
-        }).eq("id", req_id).execute()
+        update_data = {**profile_data, "status": "submitted"}
+        try:
+            update_data["review_note"] = None
+            db.client.table("doctor_join_requests").update(update_data).eq("id", req_id).execute()
+        except Exception:
+            # review_note column may not exist yet (migration 029 pending)
+            update_data.pop("review_note", None)
+            db.client.table("doctor_join_requests").update(update_data).eq("id", req_id).execute()
         logger.info(f"Doctor {doctor_id} re-submitted approval request {req_id}")
         return {"message": "Approval request submitted successfully", "id": req_id}
 
     # No existing row — create a new submitted request
+    # Fall back to 'pending' if new statuses not yet in DB (migration 029 not run)
     data = {"doctor_id": doctor_id, "status": "submitted", **profile_data}
-    req = await db.create_doctor_join_request(data)
+    try:
+        req = await db.create_doctor_join_request(data)
+    except Exception:
+        data["status"] = "pending"
+        req = await db.create_doctor_join_request(data)
     logger.info(f"Doctor {doctor_id} submitted new approval request {req.get('id')}")
     return {"message": "Approval request submitted successfully", "id": req.get("id")}
 
