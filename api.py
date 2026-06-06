@@ -2526,10 +2526,46 @@ async def submit_doctor_join_request(body: DoctorJoinRequestBody):
     req = await db.create_doctor_join_request(data)
     return {"message": "Request submitted successfully", "id": req.get("id")}
 
+
+@app.get("/doctors/me/join-request")
+async def get_my_join_request(current_doctor: Dict = Depends(require_doctor)):
+    """Return the logged-in doctor's most recent join request (status + review_note)."""
+    db = DatabaseManager()
+    profile_id = current_doctor["sub"]
+
+    doc_row = db.client.table("doctors").select("id, available_status").eq("profile_id", profile_id).limit(1).execute()
+    if not doc_row.data:
+        raise HTTPException(status_code=404, detail="Doctor record not found.")
+    doctor_id = doc_row.data[0]["id"]
+    available_status = doc_row.data[0].get("available_status", "inactive")
+
+    try:
+        req_row = db.client.table("doctor_join_requests") \
+            .select("id, status, review_note, created_at") \
+            .eq("doctor_id", doctor_id) \
+            .order("created_at", desc=True) \
+            .limit(1).execute()
+    except Exception:
+        # Fallback if review_note column doesn't exist yet (migration pending)
+        req_row = db.client.table("doctor_join_requests") \
+            .select("id, status, created_at") \
+            .eq("doctor_id", doctor_id) \
+            .order("created_at", desc=True) \
+            .limit(1).execute()
+
+    if not req_row.data:
+        return {"join_request": None, "available_status": available_status}
+
+    jr = req_row.data[0]
+    jr.setdefault("review_note", None)
+    return {"join_request": jr, "available_status": available_status}
+
+
 @app.post("/doctors/me/submit-approval")
 async def doctor_submit_approval(current_doctor: Dict = Depends(require_doctor)):
     """Authenticated doctor submits their profile for admin approval.
-    Creates a doctor_join_requests row linked to their existing doctor record.
+    If a draft join request already exists (auto-created at OTP login), update it to
+    'submitted'. Otherwise create a new submitted request.
     Note: JWT sub = profile_id (not doctors.id), so we look up by profile_id."""
     db = DatabaseManager()
     profile_id = current_doctor["sub"]
@@ -2545,20 +2581,20 @@ async def doctor_submit_approval(current_doctor: Dict = Depends(require_doctor))
     prof_row = db.client.table("profiles").select("first_name, last_name, phone, email").eq("id", profile_id).limit(1).execute()
     prof = prof_row.data[0] if prof_row.data else {}
 
-    # Block duplicate pending requests
-    existing = db.client.table("doctor_join_requests") \
+    # Block re-submission if already submitted/under_review/approved
+    in_flight = db.client.table("doctor_join_requests") \
         .select("id", "status") \
         .eq("doctor_id", doctor_id) \
-        .eq("status", "pending") \
+        .in_("status", ["submitted", "under_review", "approved"]) \
         .limit(1).execute()
-    if existing.data:
-        raise HTTPException(status_code=409, detail="You already have a pending approval request.")
+    if in_flight.data:
+        existing_status = in_flight.data[0]["status"]
+        raise HTTPException(status_code=409, detail=f"Your request is already {existing_status}.")
 
     specs_list = doctor_row.get("specialties") or []
     specs_str  = ", ".join(specs_list) if specs_list else "general_medicine"
 
-    data = {
-        "doctor_id":        doctor_id,
+    profile_data = {
         "first_name":       prof.get("first_name") or "",
         "last_name":        prof.get("last_name")  or "",
         "phone":            prof.get("phone")      or "",
@@ -2572,8 +2608,28 @@ async def doctor_submit_approval(current_doctor: Dict = Depends(require_doctor))
         "consultation_fee": doctor_row.get("consultation_fee"),
         "notes":            "",
     }
+
+    # If there is an existing draft or changes_requested row, update it to submitted
+    existing_draft = db.client.table("doctor_join_requests") \
+        .select("id") \
+        .eq("doctor_id", doctor_id) \
+        .in_("status", ["draft", "changes_requested"]) \
+        .limit(1).execute()
+
+    if existing_draft.data:
+        req_id = existing_draft.data[0]["id"]
+        db.client.table("doctor_join_requests").update({
+            **profile_data,
+            "status":      "submitted",
+            "review_note": None,
+        }).eq("id", req_id).execute()
+        logger.info(f"Doctor {doctor_id} re-submitted approval request {req_id}")
+        return {"message": "Approval request submitted successfully", "id": req_id}
+
+    # No existing row — create a new submitted request
+    data = {"doctor_id": doctor_id, "status": "submitted", **profile_data}
     req = await db.create_doctor_join_request(data)
-    logger.info(f"Doctor {doctor_id} submitted approval request {req.get('id')}")
+    logger.info(f"Doctor {doctor_id} submitted new approval request {req.get('id')}")
     return {"message": "Approval request submitted successfully", "id": req.get("id")}
 
 @app.get("/admin/doctor-requests")
@@ -2599,12 +2655,14 @@ async def admin_approve_doctor_request(
     req = await db.get_doctor_join_request(request_id)
     if not req:
         raise HTTPException(status_code=404, detail="Request not found")
-    if req["status"] != "pending":
+    # Allow approval from any non-terminal state (draft, submitted, under_review, changes_requested)
+    if req["status"] in ("approved", "rejected"):
         raise HTTPException(status_code=409, detail=f"Request is already {req['status']}")
 
     # ── Self-registered doctor (has doctor_id) ─────────────────────────────
     if req.get("doctor_id"):
         doctor_id = req["doctor_id"]
+        # Activate doctor account + set available_status to available
         db.client.table("doctors") \
             .update({"available_status": "available"}) \
             .eq("id", doctor_id) \
@@ -2671,11 +2729,49 @@ async def admin_reject_doctor_request(
     req = await db.get_doctor_join_request(request_id)
     if not req:
         raise HTTPException(status_code=404, detail="Request not found")
-    if req["status"] != "pending":
+    if req["status"] in ("approved", "rejected"):
         raise HTTPException(status_code=409, detail=f"Request is already {req['status']}")
     await db.update_doctor_join_request_status(request_id, "rejected", current_admin["sub"])
     logger.info(f"Admin {current_admin['sub']} rejected doctor request {request_id}")
     return {"message": "Request rejected"}
+
+
+# ── BACKEND TASK 3: Admin "Request Changes" endpoint ─────────────────────────
+
+class _RequestChangesBody(BaseModel):
+    note: str = ""
+
+@app.post("/admin/doctor-requests/{request_id}/request-changes")
+async def admin_request_changes(
+    request_id: str,
+    body: _RequestChangesBody,
+    current_admin: Dict = Depends(require_admin),
+):
+    """Admin sends back a join request with a note requesting the doctor make changes."""
+    db = DatabaseManager()
+    req = await db.get_doctor_join_request(request_id)
+    if not req:
+        raise HTTPException(status_code=404, detail="Request not found")
+    if req["status"] in ("approved", "rejected"):
+        raise HTTPException(status_code=409, detail=f"Request is already {req['status']} and cannot be changed")
+
+    update_data = {
+        "status":      "changes_requested",
+        "reviewed_by": current_admin["sub"],
+        "reviewed_at": "now()",
+    }
+    # review_note column is added in migration 029; include it if migration has been applied
+    try:
+        db.client.table("doctor_join_requests").update({
+            **update_data,
+            "review_note": body.note or None,
+        }).eq("id", request_id).execute()
+    except Exception:
+        # Fallback: update without review_note (migration not yet applied)
+        db.client.table("doctor_join_requests").update(update_data).eq("id", request_id).execute()
+
+    logger.info(f"Admin {current_admin['sub']} requested changes on doctor request {request_id}: {body.note[:80] if body.note else ''}")
+    return {"message": "Changes requested", "request_id": request_id}
 
 
 @app.get("/admin/patients/{profile_id}/family-members")
@@ -5043,6 +5139,7 @@ async def update_doctor_profile_full(
     available_status: str = Form(default=""),
     experience_years: str = Form(default=""),
     nmc_number:       str = Form(default=""),
+    medical_college:  str = Form(default=""),
     specialties:      str = Form(default=""),
     available_slots:  str = Form(default=""),
     current_user: Dict = Depends(require_doctor),
@@ -5054,6 +5151,7 @@ async def update_doctor_profile_full(
     if clinic_address:   updates["clinic_address"]   = clinic_address
     if clinic_phone:     updates["clinic_phone"]      = clinic_phone
     if nmc_number:       updates["nmc_number"]        = nmc_number
+    if medical_college:  updates["medical_college"]   = medical_college
     if available_status and available_status in ("available", "busy", "offline", "on_leave"):
         updates["available_status"] = available_status
     if consultation_fee:

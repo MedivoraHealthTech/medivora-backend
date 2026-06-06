@@ -881,8 +881,9 @@ CREATE TABLE IF NOT EXISTS doctor_join_requests (
     clinic_address    TEXT        NOT NULL DEFAULT '',
     consultation_fee  DECIMAL(10,2),
     notes             TEXT        NOT NULL DEFAULT '',
-    status            TEXT        NOT NULL DEFAULT 'pending'
-                        CHECK (status IN ('pending', 'approved', 'rejected')),
+    status            TEXT        NOT NULL DEFAULT 'draft'
+                        CHECK (status IN ('draft', 'submitted', 'under_review', 'approved', 'rejected', 'changes_requested')),
+    review_note       TEXT,
     reviewed_at       TIMESTAMPTZ,
     reviewed_by       UUID,
     doctor_id         UUID        REFERENCES doctors(id),  -- set for self-registered doctors

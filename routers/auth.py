@@ -384,7 +384,7 @@ async def verify_otp(req: VerifyOTPRequest):
                 "nmc_number":       "",
                 "clinic_name":      "",
                 "clinic_address":   "",
-                "status":           "pending",
+                "status":           "draft",
             }).execute()
         except Exception:
             pass  # join request creation is non-blocking
