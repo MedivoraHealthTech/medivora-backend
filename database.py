@@ -407,8 +407,8 @@ class DatabaseManager:
         patient-facing views."""
         query = self.client.table("doctors").select("*, profiles(first_name, last_name, email, phone)")
         if patient_facing:
-            # Show available (bookable) and inactive (pending approval, visible but not bookable)
-            query = query.in_("available_status", ["available", "inactive"])
+            # Only show fully approved doctors to patients
+            query = query.eq("available_status", "available")
         result = query.order("sort_order", desc=False).execute()
         doctors = []
         for row in result.data or []:
