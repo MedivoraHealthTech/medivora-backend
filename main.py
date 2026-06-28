@@ -222,14 +222,20 @@ async def dev_confirm_booking(
 # ── Legacy routes (api.py) — mounted to cover all not-yet-migrated endpoints ──
 # Routes defined in the new routers above take precedence.
 from api import app as _legacy_app  # noqa: E402
+# Build the dedup set once before iterating; skip non-route objects like _IncludedRouter.
+existing = {
+    (r.path, frozenset(getattr(r, "methods", None) or []))
+    for r in app.routes
+    if hasattr(r, "path")
+}
 for route in _legacy_app.routes:
     # Skip routes already registered by the new routers to avoid duplicates.
     # Dedup by (path, methods) so GET and PUT on the same path are both kept.
-    existing = {(r.path, frozenset(getattr(r, "methods", None) or [])) for r in app.routes if hasattr(r, "path")}
     if hasattr(route, "path"):
         key = (route.path, frozenset(getattr(route, "methods", None) or []))
         if key not in existing:
             app.routes.append(route)
+            existing.add(key)
 
 
 # ── DELETE /account ───────────────────────────────────────────────────
